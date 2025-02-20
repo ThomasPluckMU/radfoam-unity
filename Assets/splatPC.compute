@@ -1,0 +1,97 @@
+
+#pragma kernel RadFoam
+
+float4x4 _Camera2WorldMatrix;
+float4x4 _InverseProjectionMatrix;
+
+Texture2D<float4> _srcTex;
+RWTexture2D<float4> _outTex;
+
+float2 GetPixelCoords(uint2 id)
+{
+    uint w, h;
+    _outTex.GetDimensions(w, h);
+    return id / float2(w, h) * 2 - 1;
+}
+
+struct Ray
+{
+    float3 origin;
+    float3 direction;
+};
+
+Ray GetCameraRay(float2 pixelCoords)
+{
+    Ray o;
+    o.origin       = mul(_Camera2WorldMatrix, float4(0,0,0,1)).xyz; 
+    float3 fragPos = mul(_InverseProjectionMatrix, float4(pixelCoords,0,1)).xyz; 
+    o.direction    = normalize( mul(_Camera2WorldMatrix, float4(fragPos,0)).xyz );
+    return o;
+}
+
+uint _start_index;
+StructuredBuffer<float3> _positions;
+StructuredBuffer<float4> _attributes;
+StructuredBuffer<uint> _adjacency_offset;
+StructuredBuffer<uint> _adjacency;
+
+
+[numthreads(8,8,1)]
+void RadFoam (uint3 id : SV_DispatchThreadID)
+{
+    float2 pixelCoords = GetPixelCoords(id.xy);
+    Ray ray = GetCameraRay(pixelCoords);
+    float t_0 = 0.0f;
+
+    float transmittance = 1.0f;
+    float3 color = float3(0,0,0);
+
+    uint cell = _start_index;
+    for (int i = 0; i < 10000 && transmittance > 0.1; i++) {
+        float3 cell_pos = _positions[cell];
+        uint adj_from = _adjacency_offset[cell-1];
+        uint adj_to = _adjacency_offset[cell ];
+
+        float t_1 = 3.40282347e38;
+        uint closest = cell; 
+
+        for (uint a = adj_from; a < adj_to; a++) {
+            uint adj = _adjacency[a];
+            float3 adj_pos = _positions[adj];
+
+            float3 normal = adj_pos - cell_pos;
+            float denom = dot(normal, ray.direction);
+
+            if (denom <= 0.0) {
+                continue;
+            }
+
+            float3 mid = (adj_pos + cell_pos) * 0.5f;
+            float t = dot(mid - ray.origin, normal) / denom;
+            if (t < t_1) {
+                t_1 = t;
+                closest = adj;
+            }
+        }
+
+        if (closest == cell) {
+            break;
+        }
+
+        {
+            float4 attr = _attributes[cell];
+            float dist = max(0, t_1 - t_0);
+            float alpha = 1.0 - exp(-attr.w * dist);
+            float weight = transmittance * alpha;
+            color += attr.xyz * weight;
+            transmittance = transmittance * (1.0 - alpha);
+        }
+
+        t_0 = max(t_0, t_1);
+        cell = closest;
+    };
+
+    
+
+    _outTex[id.xy] = float4(lerp(color, _srcTex[id.xy], transmittance), 1);
+}
