@@ -78,14 +78,16 @@ public class RadFoam : MonoBehaviour
         }
 
         {
-            adjacency_diff_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, adjacency_count, sizeof(short) * 3);
-            var kernel = radfoamShader.FindKernel("RadFoam");
-
+            adjacency_diff_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, adjacency_count, sizeof(float) * 2);
+            var kernel = radfoamShader.FindKernel("BuildAdjDiff");
+            radfoamShader.SetInt("_Count", count);
             radfoamShader.SetBuffer(kernel, "_start_index", closest_index_buffer);
             radfoamShader.SetBuffer(kernel, "_positions", positions_buffer);
-            radfoamShader.SetBuffer(kernel, "_attributes", attributes_buffer);
             radfoamShader.SetBuffer(kernel, "_adjacency_offset", adjacency_offset_buffer);
             radfoamShader.SetBuffer(kernel, "_adjacency", adjacency_buffer);
+            radfoamShader.SetBuffer(kernel, "_adjacency_diff", adjacency_diff_buffer);
+
+            radfoamShader.Dispatch(kernel, Mathf.CeilToInt(count / 1024f), 1, 1);
         }
     }
 
@@ -135,7 +137,6 @@ public class RadFoam : MonoBehaviour
             radfoamShader.SetTexture(kernel, "_outTex", tmp);
             radfoamShader.SetMatrix("_Camera2WorldMatrix", Target.worldToLocalMatrix * camera.cameraToWorldMatrix);
             radfoamShader.SetMatrix("_InverseProjectionMatrix", camera.projectionMatrix.inverse);
-
 
             radfoamShader.SetBuffer(kernel, "_start_index", closest_index_buffer);
             radfoamShader.SetBuffer(kernel, "_positions", positions_buffer);

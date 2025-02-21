@@ -34,7 +34,7 @@ StructuredBuffer<float3> _positions;
 StructuredBuffer<float4> _attributes;
 StructuredBuffer<uint> _adjacency_offset;
 StructuredBuffer<uint> _adjacency;
-RWStructuredBuffer<half3> _adjacency_diff;
+RWStructuredBuffer<half4> _adjacency_diff;
 
 [numthreads(8,8,1)]
 void RadFoam (uint3 id : SV_DispatchThreadID)
@@ -113,6 +113,6 @@ void BuildAdjDiff (uint3 id : SV_DispatchThreadID)
         float3 adj_pos = _positions[adj];
         float3 adj_diff = adj_pos - cell_pos;
 
-        _adjacency_diff[a] = adj_diff;
+        _adjacency_diff[a] = half4(adj_diff, 0);
     }
 }
