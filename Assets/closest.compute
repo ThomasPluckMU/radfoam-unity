@@ -1,0 +1,70 @@
+#pragma kernel FindClosestPosition
+#pragma kernel FindClosestPositionStep
+
+float3 _TargetPosition;
+uint _Count;
+StructuredBuffer<float3> _positions;
+RWStructuredBuffer<uint> _Result;
+RWStructuredBuffer<float> _Distance;
+
+#define THREADS_PER_GROUP 1024
+#define FLT_MAX 3.4028235e+38
+
+groupshared uint sharedIndices[THREADS_PER_GROUP];
+groupshared float sharedDistances[THREADS_PER_GROUP];
+
+void reduce_group(uint local_index, uint group_index) 
+{
+    for (uint stride = THREADS_PER_GROUP / 2; stride > 0; stride /= 2) {
+        if (local_index < stride) {
+            if (sharedDistances[local_index + stride] < sharedDistances[local_index]) {
+                sharedDistances[local_index] = sharedDistances[local_index + stride];
+                sharedIndices[local_index] = sharedIndices[local_index + stride];
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    if (local_index == 0) {
+        _Result[group_index] = sharedIndices[0];
+        _Distance[group_index] = sharedDistances[0];
+    }
+}
+
+[numthreads(THREADS_PER_GROUP, 1, 1)]
+void FindClosestPosition(uint3 id : SV_DispatchThreadID,
+                         uint3 groupId : SV_GroupID, 
+                         uint3 localId : SV_GroupThreadID)
+{
+    if (id.x >= _Count) {
+        sharedDistances[localId.x] = FLT_MAX;
+    } else {
+        float3 diff = _positions[id.x] - _TargetPosition;
+        sharedDistances[localId.x] = dot(diff, diff);
+    }
+    
+    sharedIndices[localId.x] = id.x;
+
+    GroupMemoryBarrierWithGroupSync();
+
+    reduce_group(localId.x, groupId.x);
+}
+
+[numthreads(THREADS_PER_GROUP, 1, 1)]
+void FindClosestPositionStep(uint3 id : SV_DispatchThreadID,
+                             uint3 groupId : SV_GroupID, 
+                             uint3 localId : SV_GroupThreadID)
+{
+    uint index = id.x;
+    if (index >= _Count) {
+        sharedDistances[localId.x] = FLT_MAX;
+        sharedIndices[localId.x] = 0;
+    } else {
+        sharedDistances[localId.x] = _Distance[index];
+        sharedIndices[localId.x] = _Result[index];
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    reduce_group(localId.x, groupId.x);
+}

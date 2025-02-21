@@ -1,4 +1,4 @@
-
+#pragma kernel BuildAdjDiff
 #pragma kernel RadFoam
 
 float4x4 _Camera2WorldMatrix;
@@ -29,12 +29,12 @@ Ray GetCameraRay(float2 pixelCoords)
     return o;
 }
 
-uint _start_index;
+StructuredBuffer<uint> _start_index;
 StructuredBuffer<float3> _positions;
 StructuredBuffer<float4> _attributes;
 StructuredBuffer<uint> _adjacency_offset;
 StructuredBuffer<uint> _adjacency;
-
+RWStructuredBuffer<half3> _adjacency_diff;
 
 [numthreads(8,8,1)]
 void RadFoam (uint3 id : SV_DispatchThreadID)
@@ -46,7 +46,7 @@ void RadFoam (uint3 id : SV_DispatchThreadID)
     float transmittance = 1.0f;
     float3 color = float3(0,0,0);
 
-    uint cell = _start_index;
+    uint cell = _start_index[0];
     for (int i = 0; i < 10000 && transmittance > 0.1; i++) {
         float3 cell_pos = _positions[cell];
         uint adj_from = _adjacency_offset[cell-1];
@@ -91,7 +91,28 @@ void RadFoam (uint3 id : SV_DispatchThreadID)
         cell = closest;
     };
 
-    
+    _outTex[id.xy] = float4(lerp(color, _srcTex[id.xy].xyz, transmittance), 1);
+}
 
-    _outTex[id.xy] = float4(lerp(color, _srcTex[id.xy], transmittance), 1);
+uint _Count;
+
+[numthreads(1024, 1, 1)]
+void BuildAdjDiff (uint3 id : SV_DispatchThreadID)
+{
+    uint cell = id.x;
+    if (cell >= _Count)
+        return;
+
+    float3 cell_pos = _positions[cell];
+
+    uint adj_from = _adjacency_offset[cell-1];
+    uint adj_to = _adjacency_offset[cell];
+
+    for (uint a = adj_from; a < adj_to; a++) {
+        uint adj = _adjacency[a];
+        float3 adj_pos = _positions[adj];
+        float3 adj_diff = adj_pos - cell_pos;
+
+        _adjacency_diff[a] = adj_diff;
+    }
 }
