@@ -3,7 +3,7 @@
 
 float3 _TargetPosition;
 uint _Count;
-StructuredBuffer<float3> _positions;
+StructuredBuffer<float4> _positions;
 RWStructuredBuffer<uint> _Result;
 RWStructuredBuffer<float> _Distance;
 
@@ -39,7 +39,7 @@ void FindClosestPosition(uint3 id : SV_DispatchThreadID,
     if (id.x >= _Count) {
         sharedDistances[localId.x] = FLT_MAX;
     } else {
-        float3 diff = _positions[id.x] - _TargetPosition;
+        float3 diff = _positions[id.x].xyz - _TargetPosition;
         sharedDistances[localId.x] = dot(diff, diff);
     }
     

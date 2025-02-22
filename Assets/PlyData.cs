@@ -66,6 +66,13 @@ namespace Ply
         {
             return properties.Find(property => property.name == name);
         }
+
+        public void Debug()
+        {
+            foreach (var prop in properties) {
+                UnityEngine.Debug.Log(prop.name);
+            }
+        }
     }
 }
 

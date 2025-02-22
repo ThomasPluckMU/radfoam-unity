@@ -1,9 +1,12 @@
 #pragma kernel BuildAdjDiff
 #pragma kernel RadFoam
 
+#include "UnityCG.cginc"
+
 float4x4 _Camera2WorldMatrix;
 float4x4 _InverseProjectionMatrix;
 
+Texture2D<float> _CameraDepth;
 Texture2D<float4> _srcTex;
 RWTexture2D<float4> _outTex;
 
@@ -29,72 +32,165 @@ Ray GetCameraRay(float2 pixelCoords)
     return o;
 }
 
+#define CHUNK_SIZE 4
+#define SH_DEGREE 3
+#define SH_DIM ((SH_DEGREE + 1) * (SH_DEGREE + 1))
+
+struct SH {
+    float harmonics[SH_DIM * 3]; // TODO: compress..
+};
+
 StructuredBuffer<uint> _start_index;
-StructuredBuffer<float3> _positions;
+StructuredBuffer<float4> _positions;
 StructuredBuffer<float4> _attributes;
+StructuredBuffer<SH> _shs;
 StructuredBuffer<uint> _adjacency_offset;
 StructuredBuffer<uint> _adjacency;
-RWStructuredBuffer<half4> _adjacency_diff;
+StructuredBuffer<half4> _adjacency_diff;
 
-[numthreads(8,8,1)]
+
+
+static const float C0 = 0.28209479177387814f;
+static const float C1 = 0.4886025119029199f;
+static const float C2[5] = { 1.0925484305920792f, -1.0925484305920792f, 0.31539156525252005f, -1.0925484305920792f, 0.5462742152960396f };
+static const float C3[7] = { -0.5900435899266435f, 2.890611442640554f, -0.4570457994644658f, 0.3731763325901154f, -0.4570457994644658f, 1.445305721320277f, -0.5900435899266435f };
+
+void sh_coefficients(float3 dir, out float sh[SH_DIM]) {
+    float x = dir.x;
+    float y = dir.y;
+    float z = dir.z;
+
+    sh[0] = C0;
+
+    if (SH_DEGREE > 0) {
+        sh[1] = -C1 * y;
+        sh[2] = C1 * z;
+        sh[3] = -C1 * x;
+    }
+    float xx = x * x, yy = y * y, zz = z * z;
+    float xy = x * y, yz = y * z, xz = x * z;
+    if (SH_DEGREE > 1) {
+        sh[4] = C2[0] * xy;
+        sh[5] = C2[1] * yz;
+        sh[6] = C2[2] * (2.0f * zz - xx - yy);
+        sh[7] = C2[3] * xz;
+        sh[8] = C2[4] * (xx - yy);
+    }
+    if (SH_DEGREE > 2) {
+        sh[9] = C3[0] * y * (3.0f * xx - yy);
+        sh[10] = C3[1] * xy * z;
+        sh[11] = C3[2] * y * (4.0f * zz - xx - yy);
+        sh[12] = C3[3] * z * (2.0f * zz - 3.0f * xx - 3.0f * yy);
+        sh[13] = C3[4] * x * (4.0f * zz - xx - yy);
+        sh[14] = C3[5] * z * (xx - yy);
+        sh[15] = C3[6] * x * (xx - 3.0f * yy);
+    }
+}
+
+float3 load_sh_as_rgb(float coeffs[SH_DIM], float harmonics[SH_DIM * 3]) {
+    float3 rgb = float3(0.0f, 0.0f, 0.0f);
+
+    [unroll]
+    for (uint i = 0; i < 3 * SH_DIM; i++) {
+        rgb[i % 3] += coeffs[i / 3] * (float)harmonics[i];
+    }
+
+    return max(0, rgb);
+}
+
+[numthreads(8, 8, 1)]
 void RadFoam (uint3 id : SV_DispatchThreadID)
 {
-    float2 pixelCoords = GetPixelCoords(id.xy);
-    Ray ray = GetCameraRay(pixelCoords);
+    Ray ray;
+    {
+        uint w, h;
+        _outTex.GetDimensions(w, h);
+        if (id.x > w || id.y > h)
+            return;
+
+        float2 pixelCoords = id.xy / float2(w, h) * 2 - 1;
+        ray = GetCameraRay(pixelCoords);
+    }
+
+    float coeffs[SH_DIM];
+    sh_coefficients(ray.direction, coeffs);
+    //auto sh_coeffs = sh_coefficients<sh_degree>(ray.direction);
+
+
+    float scene_depth = LinearEyeDepth(_CameraDepth[id.xy]);
+
     float t_0 = 0.0f;
 
     float transmittance = 1.0f;
     float3 color = float3(0,0,0);
 
     uint cell = _start_index[0];
-    for (int i = 0; i < 10000 && transmittance > 0.1; i++) {
-        float3 cell_pos = _positions[cell];
-        uint adj_from = _adjacency_offset[cell-1];
-        uint adj_to = _adjacency_offset[cell ];
+
+    for (int i = 0; i < 512 && transmittance > 0.05; i++) {
+        float4 cell_pos = _positions[cell];
+        uint adj_from = cell > 0 ? _adjacency_offset[cell - 1] : 0;
+        uint adj_to = _adjacency_offset[cell];
 
         float t_1 = 3.40282347e38;
-        uint closest = cell; 
+        uint next_face = 0xFFFFFFFF; 
 
-        for (uint a = adj_from; a < adj_to; a++) {
-            uint adj = _adjacency[a];
-            float3 adj_pos = _positions[adj];
+        half3 diffs[CHUNK_SIZE];
 
-            float3 normal = adj_pos - cell_pos;
-            float denom = dot(normal, ray.direction);
+        for (uint c = adj_from; c < adj_to; c += CHUNK_SIZE) {
 
-            if (denom <= 0.0) {
-                continue;
+            [unroll]
+            for (uint a1 = 0; a1 < CHUNK_SIZE; a1++) {
+                diffs[a1] = _adjacency_diff[c + a1].xyz;
             }
 
-            float3 mid = (adj_pos + cell_pos) * 0.5f;
-            float t = dot(mid - ray.origin, normal) / denom;
-            if (t < t_1) {
-                t_1 = t;
-                closest = adj;
+            [unroll]
+            for (uint a2 = 0; a2 < CHUNK_SIZE; a2++) {
+                float3 diff = (float3)diffs[a2];
+                float denom = dot(diff, ray.direction);
+                float3 mid = cell_pos.xyz + diff * 0.5f;
+                float t = dot(mid - ray.origin, diff) / denom;
+                if (denom > 0.0f && t < t_1 && t_1 > t_0 && c + a2 < adj_to) {
+                    t_1 = t;
+                    next_face = c + a2;
+                }
             }
         }
 
-        if (closest == cell) {
+        if (next_face == 0xFFFFFFFF) {
+            break;
+        }
+        
+        
+        
+        t_1 = min(scene_depth, t_1);
+
+        float dist = t_1 - t_0;
+        float alpha = 1.0 - exp(-cell_pos.w * dist);
+        // float alpha = 1.0 - exp(-attr.w * dist);
+        float weight = transmittance * alpha;
+
+        // float4 attr = cell_pos.w > 1e-6f ? _attributes[cell] : (float4)0;
+        // float4 attr = _attributes[cell];
+        // color += attr.xyz * weight;
+
+        float3 rgb = load_sh_as_rgb(coeffs, _shs[cell]);
+        color += rgb * weight;
+
+        transmittance = transmittance * (1.0 - alpha);
+
+        if (t_1 >= scene_depth) {
             break;
         }
 
-        {
-            float4 attr = _attributes[cell];
-            float dist = max(0, t_1 - t_0);
-            float alpha = 1.0 - exp(-attr.w * dist);
-            float weight = transmittance * alpha;
-            color += attr.xyz * weight;
-            transmittance = transmittance * (1.0 - alpha);
-        }
-
-        t_0 = max(t_0, t_1);
-        cell = closest;
-    };
+        cell = _adjacency[next_face];
+        t_0 = t_1;
+    }
 
     _outTex[id.xy] = float4(lerp(color, _srcTex[id.xy].xyz, transmittance), 1);
 }
 
 uint _Count;
+RWStructuredBuffer<half4> _adjacency_diff_uav;
 
 [numthreads(1024, 1, 1)]
 void BuildAdjDiff (uint3 id : SV_DispatchThreadID)
@@ -103,16 +199,16 @@ void BuildAdjDiff (uint3 id : SV_DispatchThreadID)
     if (cell >= _Count)
         return;
 
-    float3 cell_pos = _positions[cell];
+    float3 cell_pos = _positions[cell].xyz;
 
     uint adj_from = _adjacency_offset[cell-1];
     uint adj_to = _adjacency_offset[cell];
 
     for (uint a = adj_from; a < adj_to; a++) {
         uint adj = _adjacency[a];
-        float3 adj_pos = _positions[adj];
+        float3 adj_pos = _positions[adj].xyz;
         float3 adj_diff = adj_pos - cell_pos;
 
-        _adjacency_diff[a] = half4(adj_diff, 0);
+        _adjacency_diff_uav[a] = half4(adj_diff, 0);
     }
 }
