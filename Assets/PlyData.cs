@@ -2,7 +2,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using Unity.Burst;
 using Unity.Collections;
 using Unity.Jobs;
 using UnityEngine;
@@ -20,64 +19,81 @@ namespace Ply
         public Element[] Elements { get => elements; }
         public TextAsset Binary { get => binary; }
 
-
-        [Serializable]
-        public enum DataType
-        {
-            Float, UChar, UInt
-        }
-
-        [Serializable]
-        public struct Property
-        {
-            public string name;
-            public DataType data_type;
-
-            public int byte_size() => data_type.byte_size();
-        }
-
-        [Serializable]
-
-        public struct Element
-        {
-            public string name;
-            public int count;
-            public Property[] properties;
-
-            public int byte_size()
-            {
-                int bytes = 0;
-                for (var p = 0; p < properties.Length; p++) {
-                    bytes += properties[p].byte_size();
-                }
-                return bytes;
-            }
-        }
-
-
         public void ReadFromStream(Stream stream)
         {
             var (header, read_count) = PlyDataParser.read_header(stream);
-            var blob = PlyDataParser.read_binary_blob(stream, read_count);
-            blob.name = "binary_data";
-            this.elements = header;
-            this.binary = blob;
+            var blob = new TextAsset(PlyDataParser.read_binary_blob(stream, read_count)) {
+                name = "binary_data"
+            };
+            elements = header;
+            binary = blob;
+        }
+
+        public Model Load()
+        {
+            return new Model(elements, binary.GetData<byte>());
         }
     }
 
-    public readonly struct PlyDataView : IDisposable
+    [Serializable]
+    public enum DataType
     {
-        private readonly (string, PlyElementView)[] element_views;
-        private readonly NativeArray<byte> blob;
+        Float, UChar, UInt
+    }
 
-        public PlyDataView(PlyData data)
+    [Serializable]
+    public struct Property
+    {
+        public string name;
+        public DataType data_type;
+
+        public int byte_size() => data_type.byte_size();
+    }
+
+    [Serializable]
+
+    public struct Element
+    {
+        public string name;
+        public int count;
+        public Property[] properties;
+
+        public int byte_size()
         {
-            blob = data.Binary.GetData<byte>();
+            int bytes = 0;
+            for (var p = 0; p < properties.Length; p++) {
+                bytes += properties[p].byte_size();
+            }
+            return bytes;
+        }
+    }
 
+    public readonly struct Model : IDisposable
+    {
+        private readonly NativeArray<byte> binary_blob;
+        private readonly (string, ElementView)[] element_views;
+
+        public static Model from_file(string path, Allocator alloc = Allocator.TempJob)
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024 * 8, FileOptions.SequentialScan);
+            return from_stream(stream, alloc);
+        }
+
+        public static Model from_stream(Stream stream, Allocator alloc = Allocator.TempJob)
+        {
+            var (header, read_count) = PlyDataParser.read_header(stream);
+            var blob = PlyDataParser.read_binary_blob(stream, read_count);
+            return new Model(header, new NativeArray<byte>(blob, alloc));
+        }
+
+        public Model(Element[] elements, NativeArray<byte> binary_blob)
+        {
+            this.binary_blob = binary_blob;
+
+            element_views = new (string, ElementView)[elements.Length];
             var element_offset = 0;
-            element_views = new (string, PlyElementView)[data.Elements.Length];
             for (var e = 0; e < element_views.Length; e++) {
-                var element = data.Elements[e];
+                var element = elements[e];
 
                 var element_count = element.count;
                 var element_stride = element.byte_size();
@@ -90,13 +106,13 @@ namespace Ply
                     property_offset += element.properties[p].byte_size();
                 }
 
-                var element_view = new PlyElementView(blob.Slice(element_offset, element_size), element_count, element_stride, property_views);
+                var element_view = new ElementView(binary_blob.Slice(element_offset, element_size), element_count, element_stride, property_views);
                 element_views[e] = (element.name, element_view);
                 element_offset += element_size;
             }
         }
 
-        public PlyElementView element_view(string element)
+        public ElementView element_view(string element)
         {
             for (var e = 0; e < element_views.Length; e++) {
                 if (element_views[e].Item1 == element) {
@@ -106,22 +122,20 @@ namespace Ply
             throw new ArgumentException(element);
         }
 
-
         public void Dispose()
         {
-            if (blob.IsCreated)
-                blob.Dispose();
+            binary_blob.Dispose();
         }
     }
 
-    public readonly struct PlyElementView
+    public readonly struct ElementView
     {
         private readonly (string, int)[] properties;
         public readonly int count;
         public readonly int stride;
         private readonly NativeSlice<byte> data;
 
-        public PlyElementView(NativeSlice<byte> data, int count, int stride, (string, int)[] properties)
+        public ElementView(NativeSlice<byte> data, int count, int stride, (string, int)[] properties)
         {
             this.data = data;
             this.count = count;
@@ -129,7 +143,7 @@ namespace Ply
             this.properties = properties;
         }
 
-        public PlyPropertyView property_view(string property)
+        public PropertyView property_view(string property)
         {
             var offset = -1;
             for (var i = 0; i < properties.Length; i++) {
@@ -140,12 +154,12 @@ namespace Ply
             }
             if (offset < 0)
                 throw new ArgumentException(property);
-            return new PlyPropertyView(data, count, stride, offset);
+            return new PropertyView(data, count, stride, offset);
         }
 
-        public PlyPropertyView dummy_property_view()
+        public PropertyView dummy_property_view()
         {
-            return new PlyPropertyView(data, 0, 0, 0);
+            return new PropertyView(data, 0, 0, 0);
         }
 
         public (JobHandle, NativeArray<T>) read_property<T>(string property, Allocator alloc = Allocator.TempJob) where T : unmanaged
@@ -154,14 +168,14 @@ namespace Ply
         }
     }
 
-    public readonly struct PlyPropertyView
+    public readonly struct PropertyView
     {
         [ReadOnly] public readonly NativeSlice<byte> data;
         public readonly int count;
         private readonly int stride;
         private readonly int offset;
 
-        public PlyPropertyView(NativeSlice<byte> data, int count, int stride, int offset)
+        public PropertyView(NativeSlice<byte> data, int count, int stride, int offset)
         {
             this.data = data;
             this.count = count;
@@ -183,11 +197,11 @@ namespace Ply
 
     public struct ReadJob<T> : IJobParallelFor where T : unmanaged
     {
-        [ReadOnly] private PlyPropertyView view;
+        [ReadOnly] private PropertyView view;
 
         [WriteOnly] public NativeArray<T> target;
 
-        public ReadJob(PlyPropertyView view, Allocator alloc)
+        public ReadJob(PropertyView view, Allocator alloc)
         {
             this.view = view;
             this.target = new NativeArray<T>(view.count, alloc, NativeArrayOptions.UninitializedMemory);
@@ -198,8 +212,6 @@ namespace Ply
             target[index] = view.Get<T>(index);
         }
     }
-
-
 
     public static class PlyDataParser
     {
@@ -220,27 +232,27 @@ namespace Ply
             };
         }
 
-        public static PlyData.DataType data_type_from_name(string name)
+        public static DataType data_type_from_name(string name)
         {
             return name switch {
-                "float" => PlyData.DataType.Float,
-                "uchar" => PlyData.DataType.UChar,
-                "uint" => PlyData.DataType.UInt,
+                "float" => DataType.Float,
+                "uchar" => DataType.UChar,
+                "uint" => DataType.UInt,
                 _ => throw new ArgumentException("Unknown data type. " + name),
             };
         }
 
-        public static int byte_size(this PlyData.DataType data_type)
+        public static int byte_size(this DataType data_type)
         {
             return data_type switch {
-                PlyData.DataType.Float => 4,
-                PlyData.DataType.UChar => 1,
-                PlyData.DataType.UInt => 4,
+                DataType.Float => 4,
+                DataType.UChar => 1,
+                DataType.UInt => 4,
                 _ => throw new ArgumentException("Unknown data type size. " + data_type),
             };
         }
 
-        public static (PlyData.Element[], int) read_header(Stream stream)
+        public static (Element[], int) read_header(Stream stream)
         {
             var reader = new StreamReader(stream);
             var read_count = 0;
@@ -260,15 +272,15 @@ namespace Ply
                     throw new ArgumentException("Invalid data format ('" + format + "'). Should be binary/little endian.");
             }
 
-            var elements = new List<PlyData.Element>();
+            var elements = new List<Element>();
             string name = "";
             int count = -1;
-            List<PlyData.Property> properties = new();
+            List<Property> properties = new();
 
             void add_current_element()
             {
                 if (count != -1)
-                    elements.Add(new PlyData.Element { name = name, count = count, properties = properties.ToArray() });
+                    elements.Add(new Element { name = name, count = count, properties = properties.ToArray() });
             }
 
             while (true) {
@@ -280,7 +292,7 @@ namespace Ply
                     count = Convert.ToInt32(col[2]);
                     properties.Clear();
                 } else if (kind == HeaderLineKind.Property) {
-                    properties.Add(new PlyData.Property { name = col[2], data_type = data_type_from_name(col[1]) });
+                    properties.Add(new Property { name = col[2], data_type = data_type_from_name(col[1]) });
                 } else if (kind == HeaderLineKind.EndHeader) {
                     add_current_element();
                     break;
@@ -289,13 +301,14 @@ namespace Ply
             return (elements.ToArray(), read_count);
         }
 
-        public static TextAsset read_binary_blob(Stream stream, int binary_offset)
+        // TODO: read directly to NativeArray<byte> somehow?
+        public static byte[] read_binary_blob(Stream stream, int binary_offset)
         {
             var binary_length = (int)stream.Length - binary_offset;
             var buffer = new byte[binary_length];
             stream.Seek(binary_offset, SeekOrigin.Begin);
             stream.Read(buffer, 0, binary_length);
-            return new TextAsset(buffer);
+            return buffer;
         }
     }
 }

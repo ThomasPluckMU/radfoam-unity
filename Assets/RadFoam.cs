@@ -32,10 +32,11 @@ public class RadFoam : MonoBehaviour
 
     void Start()
     {
-        Load(3);
+        using var model = Data.Load();
+        Load(model, 3);
     }
 
-    void Load(int sh_degree)
+    void Load(in Model model, int sh_degree)
     {
         var sh_count = SH_DIM(sh_degree) * 3; // one for each rgb-channel
         for (int i = 1; i <= SH_DEGREE_MAX; i++) {
@@ -47,110 +48,116 @@ public class RadFoam : MonoBehaviour
             }
         }
 
-        using (var view = new PlyDataView(Data)) {
-            var read_handles = new List<JobHandle>();
+        var read_handles = new List<JobHandle>();
 
-            var vertex_element = view.element_view("vertex");
-            var adjacency_element = view.element_view("adjacency");
-            var vertex_count = vertex_element.count;
-            var adjacency_count = adjacency_element.count;
+        var vertex_element = model.element_view("vertex");
+        var adjacency_element = model.element_view("adjacency");
+        var vertex_count = vertex_element.count;
+        var adjacency_count = adjacency_element.count;
 
-            using var adjacency = new NativeArray<uint>(adjacency_count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
-            read_handles.Add(new ReadUintJob {
-                view = adjacency_element.property_view("adjacency"),
-                target = adjacency
-            }.Schedule(adjacency_count, 512));
+        using var adjacency = new NativeArray<uint>(adjacency_count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        read_handles.Add(new ReadUintJob {
+            view = adjacency_element.property_view("adjacency"),
+            target = adjacency
+        }.Schedule(adjacency_count, 512));
 
-            using var adjacency_offset = new NativeArray<uint>(vertex_count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
-            read_handles.Add(new ReadUintJob {
-                view = vertex_element.property_view("adjacency_offset"),
-                target = adjacency_offset
-            }.Schedule(vertex_count, 512));
+        using var adjacency_offset = new NativeArray<uint>(vertex_count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        read_handles.Add(new ReadUintJob {
+            view = vertex_element.property_view("adjacency_offset"),
+            target = adjacency_offset
+        }.Schedule(vertex_count, 512));
 
-            using var points = new NativeArray<float4>(vertex_count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
-            read_handles.Add(new FillPointsDataJob {
-                x = vertex_element.property_view("x"),
-                y = vertex_element.property_view("y"),
-                z = vertex_element.property_view("z"),
-                density = vertex_element.property_view("density"),
-                points = points
-            }.Schedule(vertex_count, 512));
+        using var points = new NativeArray<float4>(vertex_count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        read_handles.Add(new FillPointsDataJob {
+            x = vertex_element.property_view("x"),
+            y = vertex_element.property_view("y"),
+            z = vertex_element.property_view("z"),
+            density = vertex_element.property_view("density"),
+            points = points
+        }.Schedule(vertex_count, 512));
 
-            using var attributes = new NativeArray<byte>(sizeof(float) * vertex_count * sh_count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        using var attributes = new NativeArray<byte>(sizeof(float) * vertex_count * sh_count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        {
+            RGBView sh_view(int index)
             {
-                RGBView sh_view(int index)
-                {
-                    string property_name(int channel) => "color_sh_" + ((index * 3) + channel);
-                    return new RGBView(vertex_element.property_view(property_name(0)), vertex_element.property_view(property_name(1)), vertex_element.property_view(property_name(2)));
-                }
-
-                // unity does not seem to like uninitialized NativeSlices when running a Job, even if they are not read
-                var dummy = new RGBView(vertex_element.dummy_property_view(), vertex_element.dummy_property_view(), vertex_element.dummy_property_view());
-                bool sh_1 = sh_degree > 0;
-                bool sh_2 = sh_degree > 1;
-                bool sh_3 = sh_degree > 2;
-
-                var sh_job = new FillColorDataJob {
-                    degree = sh_degree,
-                    stride = sizeof(float) * sh_count,
-                    color = new RGBView(vertex_element.property_view("red"), vertex_element.property_view("green"), vertex_element.property_view("blue")),
-                    sh_1 = sh_1 ? sh_view(0) : dummy,
-                    sh_2 = sh_1 ? sh_view(1) : dummy,
-                    sh_3 = sh_1 ? sh_view(2) : dummy,
-                    sh_4 = sh_2 ? sh_view(3) : dummy,
-                    sh_5 = sh_2 ? sh_view(4) : dummy,
-                    sh_6 = sh_2 ? sh_view(5) : dummy,
-                    sh_7 = sh_2 ? sh_view(6) : dummy,
-                    sh_8 = sh_2 ? sh_view(7) : dummy,
-                    sh_9 = sh_3 ? sh_view(8) : dummy,
-                    sh_10 = sh_3 ? sh_view(9) : dummy,
-                    sh_11 = sh_3 ? sh_view(10) : dummy,
-                    sh_12 = sh_3 ? sh_view(11) : dummy,
-                    sh_13 = sh_3 ? sh_view(12) : dummy,
-                    sh_14 = sh_3 ? sh_view(13) : dummy,
-                    sh_15 = sh_3 ? sh_view(14) : dummy,
-                    attributes = attributes,
-                };
-                read_handles.Add(sh_job.Schedule(vertex_count, 512));
+                string property_name(int channel) => "color_sh_" + ((index * 3) + channel);
+                return new RGBView(vertex_element.property_view(property_name(0)), vertex_element.property_view(property_name(1)), vertex_element.property_view(property_name(2)));
             }
 
-            using (var native_handles = new NativeArray<JobHandle>(read_handles.ToArray(), Allocator.Temp)) {
-                JobHandle.CompleteAll(native_handles);
-            }
+            // unity does not seem to like uninitialized NativeSlices when running a Job, even if they are not read
+            var dummy = new RGBView(vertex_element.dummy_property_view(), vertex_element.dummy_property_view(), vertex_element.dummy_property_view());
+            bool sh_1 = sh_degree > 0;
+            bool sh_2 = sh_degree > 1;
+            bool sh_3 = sh_degree > 2;
 
-            positions_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertex_count, sizeof(float) * 4);
-            positions_buffer.SetData(points);
-            shs_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertex_count, sizeof(float) * sh_count);
-            shs_buffer.SetData(attributes);
-            adjacency_offset_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertex_count, sizeof(uint));
-            adjacency_offset_buffer.SetData(adjacency_offset);
-            adjacency_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, adjacency_count, sizeof(uint));
-            adjacency_buffer.SetData(adjacency);
-
-            {
-                var reduction_group_count = Mathf.CeilToInt(vertex_count / (float)FIND_CLOSEST_THREADS_PER_GROUP);
-                closest_index_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, reduction_group_count, sizeof(uint));
-                tmp_distance_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, reduction_group_count, sizeof(float));
-            }
-
-            // calculate direction vectors between adjacent cells
-            {
-                adjacency_diff_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, adjacency_count, 4 * 4);
-                var kernel = radfoamShader.FindKernel("BuildAdjDiff");
-                radfoamShader.SetInt("_Count", vertex_count);
-                radfoamShader.SetBuffer(kernel, "_start_index", closest_index_buffer);
-                radfoamShader.SetBuffer(kernel, "_positions", positions_buffer);
-                radfoamShader.SetBuffer(kernel, "_adjacency_offset", adjacency_offset_buffer);
-                radfoamShader.SetBuffer(kernel, "_adjacency", adjacency_buffer);
-                radfoamShader.SetBuffer(kernel, "_adjacency_diff_uav", adjacency_diff_buffer);
-                radfoamShader.Dispatch(kernel, Mathf.CeilToInt(vertex_count / 1024f), 1, 1);
-            }
+            var sh_job = new FillColorDataJob {
+                degree = sh_degree,
+                stride = sizeof(float) * sh_count,
+                color = new RGBView(vertex_element.property_view("red"), vertex_element.property_view("green"), vertex_element.property_view("blue")),
+                sh_1 = sh_1 ? sh_view(0) : dummy,
+                sh_2 = sh_1 ? sh_view(1) : dummy,
+                sh_3 = sh_1 ? sh_view(2) : dummy,
+                sh_4 = sh_2 ? sh_view(3) : dummy,
+                sh_5 = sh_2 ? sh_view(4) : dummy,
+                sh_6 = sh_2 ? sh_view(5) : dummy,
+                sh_7 = sh_2 ? sh_view(6) : dummy,
+                sh_8 = sh_2 ? sh_view(7) : dummy,
+                sh_9 = sh_3 ? sh_view(8) : dummy,
+                sh_10 = sh_3 ? sh_view(9) : dummy,
+                sh_11 = sh_3 ? sh_view(10) : dummy,
+                sh_12 = sh_3 ? sh_view(11) : dummy,
+                sh_13 = sh_3 ? sh_view(12) : dummy,
+                sh_14 = sh_3 ? sh_view(13) : dummy,
+                sh_15 = sh_3 ? sh_view(14) : dummy,
+                attributes = attributes,
+            };
+            read_handles.Add(sh_job.Schedule(vertex_count, 512));
         }
+
+        using (var native_handles = new NativeArray<JobHandle>(read_handles.ToArray(), Allocator.Temp)) {
+            JobHandle.CompleteAll(native_handles);
+        }
+
+        positions_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertex_count, sizeof(float) * 4);
+        positions_buffer.SetData(points);
+        shs_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertex_count, sizeof(float) * sh_count);
+        shs_buffer.SetData(attributes);
+        adjacency_offset_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertex_count, sizeof(uint));
+        adjacency_offset_buffer.SetData(adjacency_offset);
+        adjacency_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, adjacency_count, sizeof(uint));
+        adjacency_buffer.SetData(adjacency);
+
+        {
+            var reduction_group_count = Mathf.CeilToInt(vertex_count / (float)FIND_CLOSEST_THREADS_PER_GROUP);
+            closest_index_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, reduction_group_count, sizeof(uint));
+            tmp_distance_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, reduction_group_count, sizeof(float));
+        }
+
+        // calculate direction vectors between adjacent cells
+        {
+            adjacency_diff_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, adjacency_count, 4 * 4);
+            var kernel = radfoamShader.FindKernel("BuildAdjDiff");
+            radfoamShader.SetInt("_Count", vertex_count);
+            radfoamShader.SetBuffer(kernel, "_start_index", closest_index_buffer);
+            radfoamShader.SetBuffer(kernel, "_positions", positions_buffer);
+            radfoamShader.SetBuffer(kernel, "_adjacency_offset", adjacency_offset_buffer);
+            radfoamShader.SetBuffer(kernel, "_adjacency", adjacency_buffer);
+            radfoamShader.SetBuffer(kernel, "_adjacency_diff_uav", adjacency_diff_buffer);
+            radfoamShader.Dispatch(kernel, Mathf.CeilToInt(vertex_count / 1024f), 1, 1);
+        }
+
     }
 
     void Update()
     {
         fisheye_fov = Mathf.Clamp(fisheye_fov + Input.mouseScrollDelta.y * -4, 10, 120);
+
+        if (Input.GetKeyDown(KeyCode.Return)) {
+            OnDestroy();
+            using (var model = Model.from_file("C:/Users/Chris/Downloads/scene(3).ply")) {
+                Load(model, 0);
+            }
+        }
     }
 
     void OnRenderImage(RenderTexture srcRenderTex, RenderTexture outRenderTex)
@@ -232,10 +239,10 @@ public class RadFoam : MonoBehaviour
     [BurstCompile]
     struct FillPointsDataJob : IJobParallelFor
     {
-        public PlyPropertyView x;
-        public PlyPropertyView y;
-        public PlyPropertyView z;
-        public PlyPropertyView density;
+        public PropertyView x;
+        public PropertyView y;
+        public PropertyView z;
+        public PropertyView density;
         [WriteOnly] public NativeArray<float4> points;
 
         public void Execute(int index)
@@ -246,16 +253,16 @@ public class RadFoam : MonoBehaviour
 
     struct RGBView
     {
-        public PlyPropertyView R, G, B;
+        public PropertyView R, G, B;
 
-        public RGBView(PlyPropertyView r, PlyPropertyView g, PlyPropertyView b)
+        public RGBView(PropertyView r, PropertyView g, PropertyView b)
         {
             R = r;
             G = g;
             B = b;
         }
 
-        public RGBView(PlyPropertyView dummy)
+        public RGBView(PropertyView dummy)
         {
             R = dummy;
             G = dummy;
@@ -340,7 +347,7 @@ public class RadFoam : MonoBehaviour
     [BurstCompile]
     public struct ReadUintJob : IJobParallelFor
     {
-        [ReadOnly] public PlyPropertyView view;
+        [ReadOnly] public PropertyView view;
 
         [WriteOnly] public NativeArray<uint> target;
 
