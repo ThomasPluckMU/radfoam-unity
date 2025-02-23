@@ -17,7 +17,7 @@ static const float C3[7] = { -0.5900435899266435f, 2.890611442640554f, -0.457045
 
 void sh_coefficients(float3 dir, out float sh[SH_DIM]) {
     float x = dir.x;
-    float y = -dir.y;
+    float y = dir.y;
     float z = dir.z;
 
     sh[0] = C0;

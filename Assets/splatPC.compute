@@ -37,14 +37,13 @@ Ray GetCameraRay(float2 pixelCoords)
 }
 
 static const float PI = 3.14159265f;
-Ray GetCameraRayFisheye(float2 pixelCoords, float aspect, float fov)
+Ray GetCameraRayFisheye(float2 uv, float fov)
 {
     Ray o;
     o.origin       = mul(_Camera2WorldMatrix, float4(0,0,0,1)).xyz;
 
-    pixelCoords.x *= aspect;
-    float theta = atan2(pixelCoords.y, pixelCoords.x);
-    float phi = sqrt(dot(pixelCoords, pixelCoords)) * fov * (1.0 / 360.0) * 2 * PI;
+    float theta = atan2(uv.y, uv.x);
+    float phi = sqrt(dot(uv, uv)) * fov * (1.0 / 360.0) * 2 * PI;
     float3 local_dir = sin(phi) * cos(theta) * float3(1, 0, 0) 
                     + sin(phi) * sin(theta) * float3(0, 1, 0) 
                     + cos(phi) *  float3(0, 0, -1);
@@ -80,9 +79,15 @@ void RadFoam (uint3 id : SV_DispatchThreadID)
         if (id.x > w || id.y > h)
             return;
 
+        float aspect_ratio = (float)w / (float)h;
+        float x = id.x / (float)w;
+        float y = id.y / (float)h;
+        
         float2 pixelCoords = id.xy / float2(w, h) * 2 - 1;
-        // ray = GetCameraRay(pixelCoords);
-        ray = GetCameraRayFisheye(pixelCoords, w / (float)h, _FisheyeFOV);
+
+        float2 uv = float2((2.0f * x - 1.0f) * aspect_ratio,  2.0f * y - 1.0f);
+
+        ray = GetCameraRayFisheye(uv, _FisheyeFOV);
     }
     float4 src_color = _srcTex[id.xy];
     if (dot(ray.direction, ray.direction) == 0) {
@@ -92,7 +97,7 @@ void RadFoam (uint3 id : SV_DispatchThreadID)
 
     float scene_depth = LinearEyeDepth(_CameraDepth[id.xy]);
 
-    ray.direction = normalize(ray.direction);
+    //ray.direction = normalize(ray.direction);
     float sh_coeffs[SH_DIM];
     sh_coefficients(ray.direction, sh_coeffs);
 
@@ -100,6 +105,7 @@ void RadFoam (uint3 id : SV_DispatchThreadID)
 
     // tracing state
     uint cell = _start_index[0];
+
     float transmittance = 1.0f;
     float3 color = float3(0, 0, 0);
     float t_0 = 0.0f;
@@ -139,7 +145,8 @@ void RadFoam (uint3 id : SV_DispatchThreadID)
         float alpha = 1.0 - exp(-cell_pos.w * (t_1 - t_0));
         float weight = transmittance * alpha;
 
-        float3 rgb = cell_pos.w > 1e-6f ? load_sh_as_rgb(sh_coeffs, _shs[cell].harmonics) : (float3)0;
+        // float3 rgb = cell_pos.w > 1e-6f ? load_sh_as_rgb(sh_coeffs, _shs[cell].harmonics) : (float3)0;
+        float3 rgb = load_sh_as_rgb(sh_coeffs, _shs[cell].harmonics);
         color += rgb * weight;
         transmittance = transmittance * (1.0 - alpha);
 
