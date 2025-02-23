@@ -41,7 +41,7 @@ namespace FluidFlow
                 deltaZoom = Mathf.Lerp(deltaZoom, 0, Dampen * Time.deltaTime);
 
             if (currentMouseEvent == MouseEvent.NONE) {
-                if (Input.GetKeyDown(KeyCode.LeftControl))
+                if (Input.GetMouseButtonDown(0))
                     currentMouseEvent = MouseEvent.LEFT;
                 else if (Input.GetMouseButtonDown(1))
                     currentMouseEvent = MouseEvent.RIGHT;
@@ -51,7 +51,7 @@ namespace FluidFlow
                 else
                     deltaZoom = -Input.GetAxis("Mouse Y");
 
-                if (Input.GetKeyUp(KeyCode.LeftControl) || Input.GetMouseButtonUp(1))
+                if (Input.GetMouseButtonUp(0) || Input.GetMouseButtonUp(1))
                     currentMouseEvent = MouseEvent.NONE;
             }
             Rotation.y = Mathf.Clamp(Rotation.y + deltaRot.y * RotationSpeed, -85f, 85f);

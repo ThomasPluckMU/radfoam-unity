@@ -1,8 +1,12 @@
 #pragma kernel BuildAdjDiff
 #pragma kernel RadFoam
 
-#include "UnityCG.cginc"
+#pragma multi_compile_local _ SH_DEGREE_1 SH_DEGREE_2 SH_DEGREE_3 
 
+#include "UnityCG.cginc"
+#include "sh_utils.cginc"
+
+float _FisheyeFOV;
 float4x4 _Camera2WorldMatrix;
 float4x4 _InverseProjectionMatrix;
 
@@ -28,13 +32,30 @@ Ray GetCameraRay(float2 pixelCoords)
     Ray o;
     o.origin       = mul(_Camera2WorldMatrix, float4(0,0,0,1)).xyz; 
     float3 fragPos = mul(_InverseProjectionMatrix, float4(pixelCoords,0,1)).xyz; 
-    o.direction    = normalize( mul(_Camera2WorldMatrix, float4(fragPos,0)).xyz );
+    o.direction    = mul(_Camera2WorldMatrix, float4(fragPos,0)).xyz ;
+    return o;
+}
+
+static const float PI = 3.14159265f;
+Ray GetCameraRayFisheye(float2 pixelCoords, float aspect, float fov)
+{
+    Ray o;
+    o.origin       = mul(_Camera2WorldMatrix, float4(0,0,0,1)).xyz;
+
+    pixelCoords.x *= aspect;
+    float theta = atan2(pixelCoords.y, pixelCoords.x);
+    float phi = sqrt(dot(pixelCoords, pixelCoords)) * fov * (1.0 / 360.0) * 2 * PI;
+    float3 local_dir = sin(phi) * cos(theta) * float3(1, 0, 0) 
+                    + sin(phi) * sin(theta) * float3(0, 1, 0) 
+                    + cos(phi) *  float3(0, 0, -1);
+    o.direction = mul(_Camera2WorldMatrix, float4(local_dir, 0)).xyz;
+    if (phi >= PI) {
+        o.direction = (float3)0;
+    }
     return o;
 }
 
 #define CHUNK_SIZE 4
-#define SH_DEGREE 3
-#define SH_DIM ((SH_DEGREE + 1) * (SH_DEGREE + 1))
 
 struct SH {
     float harmonics[SH_DIM * 3]; // TODO: compress..
@@ -49,55 +70,6 @@ StructuredBuffer<uint> _adjacency;
 StructuredBuffer<half4> _adjacency_diff;
 
 
-
-static const float C0 = 0.28209479177387814f;
-static const float C1 = 0.4886025119029199f;
-static const float C2[5] = { 1.0925484305920792f, -1.0925484305920792f, 0.31539156525252005f, -1.0925484305920792f, 0.5462742152960396f };
-static const float C3[7] = { -0.5900435899266435f, 2.890611442640554f, -0.4570457994644658f, 0.3731763325901154f, -0.4570457994644658f, 1.445305721320277f, -0.5900435899266435f };
-
-void sh_coefficients(float3 dir, out float sh[SH_DIM]) {
-    float x = dir.x;
-    float y = dir.y;
-    float z = dir.z;
-
-    sh[0] = C0;
-
-    if (SH_DEGREE > 0) {
-        sh[1] = -C1 * y;
-        sh[2] = C1 * z;
-        sh[3] = -C1 * x;
-    }
-    float xx = x * x, yy = y * y, zz = z * z;
-    float xy = x * y, yz = y * z, xz = x * z;
-    if (SH_DEGREE > 1) {
-        sh[4] = C2[0] * xy;
-        sh[5] = C2[1] * yz;
-        sh[6] = C2[2] * (2.0f * zz - xx - yy);
-        sh[7] = C2[3] * xz;
-        sh[8] = C2[4] * (xx - yy);
-    }
-    if (SH_DEGREE > 2) {
-        sh[9] = C3[0] * y * (3.0f * xx - yy);
-        sh[10] = C3[1] * xy * z;
-        sh[11] = C3[2] * y * (4.0f * zz - xx - yy);
-        sh[12] = C3[3] * z * (2.0f * zz - 3.0f * xx - 3.0f * yy);
-        sh[13] = C3[4] * x * (4.0f * zz - xx - yy);
-        sh[14] = C3[5] * z * (xx - yy);
-        sh[15] = C3[6] * x * (xx - 3.0f * yy);
-    }
-}
-
-float3 load_sh_as_rgb(float coeffs[SH_DIM], float harmonics[SH_DIM * 3]) {
-    float3 rgb = float3(0.0f, 0.0f, 0.0f);
-
-    [unroll]
-    for (uint i = 0; i < 3 * SH_DIM; i++) {
-        rgb[i % 3] += coeffs[i / 3] * (float)harmonics[i];
-    }
-
-    return max(0, rgb);
-}
-
 [numthreads(8, 8, 1)]
 void RadFoam (uint3 id : SV_DispatchThreadID)
 {
@@ -109,47 +81,51 @@ void RadFoam (uint3 id : SV_DispatchThreadID)
             return;
 
         float2 pixelCoords = id.xy / float2(w, h) * 2 - 1;
-        ray = GetCameraRay(pixelCoords);
+        // ray = GetCameraRay(pixelCoords);
+        ray = GetCameraRayFisheye(pixelCoords, w / (float)h, _FisheyeFOV);
     }
-
-    float coeffs[SH_DIM];
-    sh_coefficients(ray.direction, coeffs);
-    //auto sh_coeffs = sh_coefficients<sh_degree>(ray.direction);
-
+    float4 src_color = _srcTex[id.xy];
+    if (dot(ray.direction, ray.direction) == 0) {
+        _outTex[id.xy] = src_color;
+        return; // fisheye fov too large
+    }
 
     float scene_depth = LinearEyeDepth(_CameraDepth[id.xy]);
 
+    ray.direction = normalize(ray.direction);
+    float sh_coeffs[SH_DIM];
+    sh_coefficients(ray.direction, sh_coeffs);
+
+    float4 diffs[CHUNK_SIZE];
+
+    // tracing state
+    uint cell = _start_index[0];
+    float transmittance = 1.0f;
+    float3 color = float3(0, 0, 0);
     float t_0 = 0.0f;
 
-    float transmittance = 1.0f;
-    float3 color = float3(0,0,0);
-
-    uint cell = _start_index[0];
-
-    for (int i = 0; i < 512 && transmittance > 0.05; i++) {
+    for (int i = 0; i < 256 && transmittance > 0.001; i++) {
         float4 cell_pos = _positions[cell];
         uint adj_from = cell > 0 ? _adjacency_offset[cell - 1] : 0;
         uint adj_to = _adjacency_offset[cell];
 
-        float t_1 = 3.40282347e38;
+        float t_1 = scene_depth;
         uint next_face = 0xFFFFFFFF; 
-
-        half3 diffs[CHUNK_SIZE];
 
         for (uint c = adj_from; c < adj_to; c += CHUNK_SIZE) {
 
             [unroll]
             for (uint a1 = 0; a1 < CHUNK_SIZE; a1++) {
-                diffs[a1] = _adjacency_diff[c + a1].xyz;
+                diffs[a1] = (float4)_adjacency_diff[c + a1];
             }
 
             [unroll]
             for (uint a2 = 0; a2 < CHUNK_SIZE; a2++) {
-                float3 diff = (float3)diffs[a2];
+                float3 diff = diffs[a2].xyz;
                 float denom = dot(diff, ray.direction);
                 float3 mid = cell_pos.xyz + diff * 0.5f;
                 float t = dot(mid - ray.origin, diff) / denom;
-                if (denom > 0.0f && t < t_1 && t_1 > t_0 && c + a2 < adj_to) {
+                if (denom > 0.0f && t < t_1 && t > t_0 && c + a2 < adj_to) {
                     t_1 = t;
                     next_face = c + a2;
                 }
@@ -159,23 +135,12 @@ void RadFoam (uint3 id : SV_DispatchThreadID)
         if (next_face == 0xFFFFFFFF) {
             break;
         }
-        
-        
-        
-        t_1 = min(scene_depth, t_1);
 
-        float dist = t_1 - t_0;
-        float alpha = 1.0 - exp(-cell_pos.w * dist);
-        // float alpha = 1.0 - exp(-attr.w * dist);
+        float alpha = 1.0 - exp(-cell_pos.w * (t_1 - t_0));
         float weight = transmittance * alpha;
 
-        // float4 attr = cell_pos.w > 1e-6f ? _attributes[cell] : (float4)0;
-        // float4 attr = _attributes[cell];
-        // color += attr.xyz * weight;
-
-        float3 rgb = load_sh_as_rgb(coeffs, _shs[cell]);
+        float3 rgb = cell_pos.w > 1e-6f ? load_sh_as_rgb(sh_coeffs, _shs[cell].harmonics) : (float3)0;
         color += rgb * weight;
-
         transmittance = transmittance * (1.0 - alpha);
 
         if (t_1 >= scene_depth) {
@@ -186,8 +151,11 @@ void RadFoam (uint3 id : SV_DispatchThreadID)
         t_0 = t_1;
     }
 
-    _outTex[id.xy] = float4(lerp(color, _srcTex[id.xy].xyz, transmittance), 1);
+    _outTex[id.xy] = float4(lerp(color, src_color.xyz, transmittance), 1);
 }
+
+
+// TODO: move to separate shader
 
 uint _Count;
 RWStructuredBuffer<half4> _adjacency_diff_uav;
@@ -201,7 +169,7 @@ void BuildAdjDiff (uint3 id : SV_DispatchThreadID)
 
     float3 cell_pos = _positions[cell].xyz;
 
-    uint adj_from = _adjacency_offset[cell-1];
+    uint adj_from = cell > 0 ? _adjacency_offset[cell-1] : 0;
     uint adj_to = _adjacency_offset[cell];
 
     for (uint a = adj_from; a < adj_to; a++) {
