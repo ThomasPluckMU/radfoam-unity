@@ -20,7 +20,7 @@ void sh_coefficients(float3 dir, out float sh[SH_DIM]) {
     float y = dir.y;
     float z = dir.z;
 
-    sh[0] = C0;
+    sh[0] = C0 + 0.5;
 
     if (SH_DEGREE > 0) {
         sh[1] = -C1 * y;
