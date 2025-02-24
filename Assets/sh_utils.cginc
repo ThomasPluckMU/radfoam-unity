@@ -9,6 +9,7 @@
 #endif
 
 #define SH_DIM ((SH_DEGREE + 1) * (SH_DEGREE + 1))
+#define SH_BUF_LEN (1 + (SH_DIM - 1) * 2)   // base color encoded as one uint, and each SH as 2 uint
 
 static const float C0 = 0.28209479177387814f;
 static const float C1 = 0.4886025119029199f;
@@ -20,7 +21,7 @@ void sh_coefficients(float3 dir, out float sh[SH_DIM]) {
     float y = dir.y;
     float z = dir.z;
 
-    sh[0] = C0 + 0.5;
+    sh[0] = C0 + 0.5; // the original code adds this 0.5 in load_sh_as_rgb, but somehow this gives wrong results for me..
 
     if (SH_DEGREE > 0) {
         sh[1] = -C1 * y;
@@ -47,12 +48,25 @@ void sh_coefficients(float3 dir, out float sh[SH_DIM]) {
     }
 }
 
-float3 load_sh_as_rgb(float coeffs[SH_DIM], float harmonics[SH_DIM * 3]) {
-    float3 rgb = float3(1.0f, 1.0f, 1.0f) * 0.0f; // ? FIXME: original code has 0.5 here..
+float3 load_sh_as_rgb(float coeffs[SH_DIM], uint harmonics[SH_BUF_LEN]) {
+    float3 rgb = float3(0.0f, 0.0f, 0.0f);
 
-    [unroll(3 * SH_DIM)]
-    for (uint i = 0; i < 3 * SH_DIM; i++) {
-        rgb[i % 3] += coeffs[i / 3] * harmonics[i];
+    [unroll(SH_DIM)]
+    for (uint i = 0; i < SH_DIM; i++) {
+        float3 unpacked;
+
+        if (i == 0) {
+            // base color compressed as bytes
+            unpacked = float3(
+                (harmonics[i] >> 0) & 0xFF, 
+                (harmonics[i] >> 8) & 0xFF, 
+                (harmonics[i] >> 16) & 0xFF) * (1.0 / 255.0);
+        } else {
+            uint a = harmonics[i * 2 - 1];
+            uint b = harmonics[i * 2];
+            unpacked = float3(f16tof32(a), f16tof32(a >> 16), f16tof32(b));
+        }
+        rgb += coeffs[i] * unpacked;
     }
 
     return max(0, rgb);

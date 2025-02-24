@@ -19,14 +19,15 @@ namespace Ply
         public Element[] Elements { get => elements; }
         public TextAsset Binary { get => binary; }
 
-        public void ReadFromStream(Stream stream)
+        public void ReadFromStream(FileStream stream)
         {
             var (header, read_count) = PlyDataParser.read_header(stream);
-            var blob = new TextAsset(PlyDataParser.read_binary_blob(stream, read_count)) {
+            using var binary_data = PlyDataParser.read_binary_blob(stream, read_count, Allocator.Temp);
+            var binary_asset = new TextAsset(binary_data) {
                 name = "binary_data"
             };
             elements = header;
-            binary = blob;
+            binary = binary_asset;
         }
 
         public Model Load()
@@ -75,15 +76,14 @@ namespace Ply
 
         public static Model from_file(string path, Allocator alloc = Allocator.TempJob)
         {
-            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024 * 8, FileOptions.SequentialScan);
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024 * 64, FileOptions.SequentialScan);
             return from_stream(stream, alloc);
         }
 
         public static Model from_stream(Stream stream, Allocator alloc = Allocator.TempJob)
         {
             var (header, read_count) = PlyDataParser.read_header(stream);
-            var blob = PlyDataParser.read_binary_blob(stream, read_count);
-            return new Model(header, new NativeArray<byte>(blob, alloc));
+            return new Model(header, PlyDataParser.read_binary_blob(stream, read_count, alloc));
         }
 
         public Model(Element[] elements, NativeArray<byte> binary_blob)
@@ -215,6 +215,7 @@ namespace Ply
 
     public static class PlyDataParser
     {
+        public const int MAX_HEADER_LINES = 256;
         private enum HeaderLineKind
         {
             Element,
@@ -283,7 +284,7 @@ namespace Ply
                     elements.Add(new Element { name = name, count = count, properties = properties.ToArray() });
             }
 
-            while (true) {
+            for (int line = 0; line < MAX_HEADER_LINES; ++line) {
                 var col = read_next_line().Split();
                 var kind = line_kind_from_name(col[0]);
                 if (kind == HeaderLineKind.Element) {
@@ -301,13 +302,14 @@ namespace Ply
             return (elements.ToArray(), read_count);
         }
 
-        // TODO: read directly to NativeArray<byte> somehow?
-        public static byte[] read_binary_blob(Stream stream, int binary_offset)
+        public static NativeArray<byte> read_binary_blob(Stream stream, int binary_offset, Allocator alloc = Allocator.Persistent)
         {
-            var binary_length = (int)stream.Length - binary_offset;
-            var buffer = new byte[binary_length];
             stream.Seek(binary_offset, SeekOrigin.Begin);
-            stream.Read(buffer, 0, binary_length);
+            var buffer = new NativeArray<byte>((int)stream.Length - binary_offset, alloc, NativeArrayOptions.UninitializedMemory);
+            if (stream.Read(buffer) != buffer.Length) {
+                buffer.Dispose();
+                throw new IOException("Incomplete binary read.");
+            }
             return buffer;
         }
     }

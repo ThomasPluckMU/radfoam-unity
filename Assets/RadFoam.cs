@@ -18,7 +18,6 @@ public class RadFoam : MonoBehaviour
 
     private GraphicsBuffer positions_buffer;
     private GraphicsBuffer shs_buffer;
-    private GraphicsBuffer adjacency_offset_buffer;
     private GraphicsBuffer adjacency_buffer;
     private GraphicsBuffer adjacency_diff_buffer;
 
@@ -28,17 +27,16 @@ public class RadFoam : MonoBehaviour
     private const int SH_DEGREE_MAX = 3;
     private int SH_DIM(int degree) => (degree + 1) * (degree + 1);
     private const int FIND_CLOSEST_THREADS_PER_GROUP = 1024;
-    private const float BYTE_INV = 1.0f / byte.MaxValue;
 
     void Start()
     {
         using var model = Data.Load();
-        Load(model, 3);
+        Load(model, 0);
     }
 
     void Load(in Model model, int sh_degree)
     {
-        var sh_count = SH_DIM(sh_degree) * 3; // one for each rgb-channel
+
         for (int i = 1; i <= SH_DEGREE_MAX; i++) {
             var kw = new LocalKeyword(radfoamShader, "SH_DEGREE_" + i);
             if (i == sh_degree) {
@@ -61,22 +59,21 @@ public class RadFoam : MonoBehaviour
             target = adjacency
         }.Schedule(adjacency_count, 512));
 
-        using var adjacency_offset = new NativeArray<uint>(vertex_count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
-        read_handles.Add(new ReadUintJob {
-            view = vertex_element.property_view("adjacency_offset"),
-            target = adjacency_offset
-        }.Schedule(vertex_count, 512));
-
         using var points = new NativeArray<float4>(vertex_count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
         read_handles.Add(new FillPointsDataJob {
             x = vertex_element.property_view("x"),
             y = vertex_element.property_view("y"),
             z = vertex_element.property_view("z"),
-            density = vertex_element.property_view("density"),
+            adj_offset = vertex_element.property_view("adjacency_offset"),
             points = points
         }.Schedule(vertex_count, 512));
 
-        using var attributes = new NativeArray<byte>(sizeof(float) * vertex_count * sh_count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        var sh_dim = SH_DIM(sh_degree);
+        var attribute_elem_size =
+            sizeof(uint)                                    // color
+            + sizeof(uint) * 2 * (SH_DIM(sh_degree) - 1)    // harmonics without base color
+            + sizeof(uint);                                 // density
+        using var attributes = new NativeArray<byte>(vertex_count * attribute_elem_size, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
         {
             RGBView sh_view(int index)
             {
@@ -92,7 +89,7 @@ public class RadFoam : MonoBehaviour
 
             var sh_job = new FillColorDataJob {
                 degree = sh_degree,
-                stride = sizeof(float) * sh_count,
+                stride = attribute_elem_size,
                 color = new RGBView(vertex_element.property_view("red"), vertex_element.property_view("green"), vertex_element.property_view("blue")),
                 sh_1 = sh_1 ? sh_view(0) : dummy,
                 sh_2 = sh_1 ? sh_view(1) : dummy,
@@ -109,6 +106,7 @@ public class RadFoam : MonoBehaviour
                 sh_13 = sh_3 ? sh_view(12) : dummy,
                 sh_14 = sh_3 ? sh_view(13) : dummy,
                 sh_15 = sh_3 ? sh_view(14) : dummy,
+                density = vertex_element.property_view("density"),
                 attributes = attributes,
             };
             read_handles.Add(sh_job.Schedule(vertex_count, 512));
@@ -120,10 +118,8 @@ public class RadFoam : MonoBehaviour
 
         positions_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertex_count, sizeof(float) * 4);
         positions_buffer.SetData(points);
-        shs_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertex_count, sizeof(float) * sh_count);
+        shs_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertex_count, attribute_elem_size);
         shs_buffer.SetData(attributes);
-        adjacency_offset_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertex_count, sizeof(uint));
-        adjacency_offset_buffer.SetData(adjacency_offset);
         adjacency_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, adjacency_count, sizeof(uint));
         adjacency_buffer.SetData(adjacency);
 
@@ -135,12 +131,12 @@ public class RadFoam : MonoBehaviour
 
         // calculate direction vectors between adjacent cells
         {
-            adjacency_diff_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, adjacency_count, 4 * 4);
+
+            adjacency_diff_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, adjacency_count, 4 * 4); // 4*2 should be enough, but somehow it isnt
             var kernel = radfoamShader.FindKernel("BuildAdjDiff");
             radfoamShader.SetInt("_Count", vertex_count);
             radfoamShader.SetBuffer(kernel, "_start_index", closest_index_buffer);
             radfoamShader.SetBuffer(kernel, "_positions", positions_buffer);
-            radfoamShader.SetBuffer(kernel, "_adjacency_offset", adjacency_offset_buffer);
             radfoamShader.SetBuffer(kernel, "_adjacency", adjacency_buffer);
             radfoamShader.SetBuffer(kernel, "_adjacency_diff_uav", adjacency_diff_buffer);
             radfoamShader.Dispatch(kernel, Mathf.CeilToInt(vertex_count / 1024f), 1, 1);
@@ -210,7 +206,6 @@ public class RadFoam : MonoBehaviour
             radfoamShader.SetBuffer(kernel, "_start_index", closest_index_buffer);
             radfoamShader.SetBuffer(kernel, "_positions", positions_buffer);
             radfoamShader.SetBuffer(kernel, "_shs", shs_buffer);
-            radfoamShader.SetBuffer(kernel, "_adjacency_offset", adjacency_offset_buffer);
             radfoamShader.SetBuffer(kernel, "_adjacency", adjacency_buffer);
             radfoamShader.SetBuffer(kernel, "_adjacency_diff", adjacency_diff_buffer);
 
@@ -226,9 +221,7 @@ public class RadFoam : MonoBehaviour
     void OnDestroy()
     {
         positions_buffer.Release();
-        // attributes_buffer.Release();
         shs_buffer.Release();
-        adjacency_offset_buffer.Release();
         adjacency_buffer.Release();
         adjacency_diff_buffer.Release();
 
@@ -242,12 +235,16 @@ public class RadFoam : MonoBehaviour
         public PropertyView x;
         public PropertyView y;
         public PropertyView z;
-        public PropertyView density;
+        public PropertyView adj_offset;
         [WriteOnly] public NativeArray<float4> points;
 
         public void Execute(int index)
         {
-            points[index] = new float4(x.Get<float>(index), y.Get<float>(index), z.Get<float>(index), density.Get<float>(index));
+            points[index] = new float4(
+                x.Get<float>(index),
+                y.Get<float>(index),
+                z.Get<float>(index),
+                adj_offset.Get<float>(index)); // this actually contains a uint, but we just treat it as a float 
         }
     }
 
@@ -291,6 +288,7 @@ public class RadFoam : MonoBehaviour
         public RGBView sh_13;
         public RGBView sh_14;
         public RGBView sh_15;
+        public PropertyView density;
 
         [WriteOnly] public NativeSlice<byte> attributes;
 
@@ -306,17 +304,24 @@ public class RadFoam : MonoBehaviour
                 offset += size;
             }
 
+            // TODO: packing and compression could be a lot better..
             void write_sh(in RGBView sh)
             {
-                write(sh.R.Get<float>(index), sizeof(float));
-                write(sh.G.Get<float>(index), sizeof(float));
-                write(sh.B.Get<float>(index), sizeof(float));
+                write(math.half(sh.R.Get<float>(index)), 2);
+                write(math.half(sh.G.Get<float>(index)), 2);
+                write(math.half(sh.B.Get<float>(index)), 2);
+                offset += 2;
             }
 
+            // Density
+            write(math.half(density.Get<float>(index)), 2);
+            offset += 2;
+
             // color
-            write(color.R.Get<byte>(index) * BYTE_INV, sizeof(float));
-            write(color.G.Get<byte>(index) * BYTE_INV, sizeof(float));
-            write(color.B.Get<byte>(index) * BYTE_INV, sizeof(float));
+            write(color.R.Get<byte>(index), 1);
+            write(color.G.Get<byte>(index), 1);
+            write(color.B.Get<byte>(index), 1);
+            offset += 1;
 
             if (degree > 0) {
                 write_sh(sh_1);
