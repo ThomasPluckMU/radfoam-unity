@@ -62,6 +62,7 @@ float3 load_sh_as_rgb(float coeffs[SH_DIM], uint harmonics[SH_BUF_LEN]) {
                 (harmonics[i] >> 8) & 0xFF, 
                 (harmonics[i] >> 16) & 0xFF) * (1.0 / 255.0);
         } else {
+            // TODO: compress harmonics further
             uint a = harmonics[i * 2 - 1];
             uint b = harmonics[i * 2];
             unpacked = float3(f16tof32(a), f16tof32(a >> 16), f16tof32(b));

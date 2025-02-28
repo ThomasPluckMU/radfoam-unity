@@ -109,9 +109,11 @@ void RadFoam (uint3 id : SV_DispatchThreadID)
     float transmittance = 1.0f;
     float3 color = float3(0, 0, 0);
     float t_0 = 0.0f;
+    float4 cell_data = _positions[cell];
 
-    for (int i = 0; i < 256 && transmittance > 0.001; i++) {
-        float4 cell_data = _positions[cell];
+    int i = 0;
+    // for (; i < 8; i++) {
+    for (; i < 256 && transmittance > 0.01; i++) {
         uint adj_from = cell > 0 ? asuint(_positions[cell - 1].w) : 0;
         uint adj_to = asuint(cell_data.w);
         Attr attrs = _shs[cell];
@@ -154,9 +156,15 @@ void RadFoam (uint3 id : SV_DispatchThreadID)
 
         cell = _adjacency[next_face];
         t_0 = t_1;
+        cell_data = _positions[cell];
     }
 
+    // _outTex[id.xy] = float4(float3(
+    //             (cell >> 0) & 0xFF, 
+    //             (cell >> 8) & 0xFF, 
+    //             (cell >> 16) & 0xFF) * (1.0 / 255.0), 1);
     _outTex[id.xy] = float4(lerp(color, src_color.xyz, transmittance), 1);
+    // _outTex[id.xy] = float4(i / 256.0, i / 256.0, i / 256.0, 1);
 }
 
 
