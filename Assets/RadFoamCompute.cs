@@ -2,11 +2,9 @@ using System.Collections.Generic;
 using Ply;
 using Unity.Burst;
 using Unity.Collections;
-using Unity.Collections.LowLevel.Unsafe;
 using Unity.Jobs;
 using Unity.Mathematics;
 using UnityEngine;
-using UnityEngine.Events;
 using UnityEngine.Rendering;
 
 public class RadFoamCompute : MonoBehaviour

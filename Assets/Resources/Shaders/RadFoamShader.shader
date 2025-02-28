@@ -18,7 +18,6 @@ Shader "Hidden/Custom/RadFoamShader"
             #pragma multi_compile_local _ SH_DEGREE_1 SH_DEGREE_2 SH_DEGREE_3 
 
             #include "UnityCG.cginc"
-            #include "sh_utils.cginc"
 
             struct blit_data
             {
@@ -42,25 +41,22 @@ Shader "Hidden/Custom/RadFoamShader"
                 float3 direction;
             };
 
-            struct Attr {
-                uint density;
-                uint harmonics[SH_BUF_LEN];
-            };
-
             sampler2D _MainTex;
             float4 _MainTex_TexelSize;
-            // sampler2D _CameraDepth;
+
             float _FisheyeFOV;
             float4x4 _Camera2WorldMatrix;
             float4x4 _InverseProjectionMatrix;
             uint _start_index;
 
+            sampler2D _attr_tex;
             sampler2D _positions_tex;
             float4 _positions_tex_TexelSize;
-            // StructuredBuffer<float4> _positions;
-            StructuredBuffer<Attr> _shs;
-            StructuredBuffer<half4> _adjacency_diff;
-            StructuredBuffer<uint> _adjacency;
+
+            sampler2D _adjacency_diff_tex; 
+            sampler2D _adjacency_tex;
+            float4 _adjacency_tex_TexelSize;
+
 
             blit_v2f blitvert(blit_data v)
             {
@@ -90,17 +86,29 @@ Shader "Hidden/Custom/RadFoamShader"
                 return o;
             }
 
-            float2 index_to_tex_buffer(int i, float2 texel_size) {
-                int y = i / 2048;
-                int x = i % 2048;
-                return float2((x+0.5) * texel_size.x, (y+0.5) * texel_size.y);
+            float2 index_to_tex_buffer(uint i, float2 texel_size, uint width) {
+                uint y = i / width;
+                uint x = i % width;
+                return float2((x + 0.5) * texel_size.x, (y + 0.5) * texel_size.y);
             }
 
-            float4 positions_buff(int i){
-                return tex2Dlod(_positions_tex, float4(index_to_tex_buffer(i, _positions_tex_TexelSize.xy), 0, 0));
+            float4 positions_buff(uint i) {
+                return tex2Dlod(_positions_tex, float4(index_to_tex_buffer(i, _positions_tex_TexelSize.xy, 4096), 0, 0));
             }
 
-            #define CHUNK_SIZE 7
+            float4 attrs_buff(uint i) {
+                return tex2Dlod(_attr_tex, float4(index_to_tex_buffer(i, _positions_tex_TexelSize.xy, 4096), 0, 0));
+            }
+
+            uint adjacency_buffer(uint i) {
+                return asuint(tex2Dlod(_adjacency_tex, float4(index_to_tex_buffer(i, _adjacency_tex_TexelSize.xy, 4096), 0, 0)).x);
+            }
+
+            float3 adjacency_diff_buffer(uint i) {
+                return tex2Dlod(_adjacency_diff_tex, float4(index_to_tex_buffer(i, _adjacency_tex_TexelSize.xy, 4096), 0, 0)).xyz;
+            }
+
+            #define CHUNK_SIZE 4
 
             fixed4 frag (blit_v2f input) : SV_Target
             {
@@ -111,14 +119,9 @@ Shader "Hidden/Custom/RadFoamShader"
                 }
                 ray.direction = normalize(ray.direction);
 
-                // FIXME: this assumes the scene camera has the same camera model..
-                // float scene_depth = LinearEyeDepth(tex2D(_CameraDepth, input.uv));
-                float scene_depth = 10000; // LinearEyeDepth(tex2D(_CameraDepth, input.uv));
+                float scene_depth = 10000; 
 
-                float sh_coeffs[SH_DIM];
-                sh_coefficients(ray.direction, sh_coeffs);
-
-                half3 diffs[CHUNK_SIZE];
+                float3 diffs[CHUNK_SIZE];
 
                 // tracing state
                 uint cell = _start_index;
@@ -127,14 +130,12 @@ Shader "Hidden/Custom/RadFoamShader"
                 float t_0 = 0.0f;
 
                 int i = 0;
-                for (; i < 256 && transmittance > 0.01; i++) {
+                for (; i < 256 && transmittance > 0.02; i++) {
                     float4 cell_data = positions_buff(cell);
                     uint adj_from = cell > 0 ? asuint(positions_buff(cell - 1).w) : 0;
 
-                    // float4 cell_data = _positions[cell];
-                    // uint adj_from = cell > 0 ? asuint(_positions[cell - 1].w) : 0;
                     uint adj_to = asuint(cell_data.w);
-                    Attr attrs = _shs[cell];
+                    float4 attrs = attrs_buff(cell);
 
                     float t_1 = scene_depth;
                     uint next_face = 0xFFFFFFFF; 
@@ -145,7 +146,7 @@ Shader "Hidden/Custom/RadFoamShader"
                         [unroll(CHUNK_SIZE)]
                         // [loop]
                         for (uint a1 = 0; a1 < CHUNK_SIZE; a1++) {
-                            diffs[a1] = (half3)_adjacency_diff[adj_from + f + a1].xyz;
+                            diffs[a1] = adjacency_diff_buffer(adj_from + f + a1).xyz;
                         }
 
                         // [loop]
@@ -161,21 +162,20 @@ Shader "Hidden/Custom/RadFoamShader"
                         }
                     }
 
-                    float density = f16tof32(attrs.density);
+                    float density = attrs.w;
                     // density = density < _CutOff ? 0 : density;
 
                     float alpha = 1.0 - exp(-density * (t_1 - t_0));
                     float weight = transmittance * alpha;
 
-                    float3 rgb = load_sh_as_rgb(sh_coeffs, attrs.harmonics);
-                    color += rgb * weight;
+                    color += attrs.rgb * weight;
                     transmittance = transmittance * (1.0 - alpha);
 
                     if (next_face == 0xFFFFFFFF) {
                         break;
                     }
 
-                    cell = _adjacency[next_face];
+                    cell = adjacency_buffer(next_face);
                     t_0 = t_1;
                 }
 
