@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using System.Linq;
 using Ply;
 using Unity.Burst;
 using Unity.Collections;
@@ -30,10 +32,23 @@ public class RadFoamCompute : MonoBehaviour
     private int SH_DIM(int degree) => (degree + 1) * (degree + 1);
     private const int FIND_CLOSEST_THREADS_PER_GROUP = 1024;
 
+    private List<int> expensive = new();
+
     void Start()
     {
         using var model = Data.Load();
-        Load(model, 1);
+        Load(model, 3);
+    }
+
+    void OnDestroy()
+    {
+        positions_buffer?.Release();
+        shs_buffer?.Release();
+        adjacency_buffer?.Release();
+        adjacency_diff_buffer?.Release();
+
+        closest_index_buffer?.Release();
+        tmp_distance_buffer?.Release();
     }
 
     void Load(in Model model, int sh_degree)
@@ -119,11 +134,107 @@ public class RadFoamCompute : MonoBehaviour
         }
 
         positions_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertex_count, sizeof(float) * 4);
-        positions_buffer.SetData(points);
         shs_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertex_count, attribute_elem_size);
-        shs_buffer.SetData(attributes);
         adjacency_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, adjacency_count, sizeof(uint));
-        adjacency_buffer.SetData(adjacency);
+
+        if (true) {
+            var re_points = new NativeArray<float4>(vertex_count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+            var re_attributes = new NativeArray<byte>(vertex_count * attribute_elem_size, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+            var re_adjacency = new NativeArray<uint>(adjacency_count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+
+
+            // Based on https://fgiesen.wordpress.com/2009/12/13/decoding-morton-codes/
+            // Insert two 0 bits after each of the 21 low bits of x
+            static ulong MortonPart1By2(ulong x)
+            {
+                x &= 0x1fffff;
+                x = (x ^ (x << 32)) & 0x1f00000000ffffUL;
+                x = (x ^ (x << 16)) & 0x1f0000ff0000ffUL;
+                x = (x ^ (x << 8)) & 0x100f00f00f00f00fUL;
+                x = (x ^ (x << 4)) & 0x10c30c30c30c30c3UL;
+                x = (x ^ (x << 2)) & 0x1249249249249249UL;
+                return x;
+            }
+            // Encode three 21-bit integers into 3D Morton order
+            static ulong MortonEncode3(uint3 v)
+            {
+                return (MortonPart1By2(v.z) << 2) | (MortonPart1By2(v.y) << 1) | MortonPart1By2(v.x);
+            }
+
+            // var min = new float3(float.MaxValue);
+            // var max = new float3(float.MinValue);
+            // for (var p = 0; p < points.Length; p++) {
+            //     var point = points[p].xyz;
+            //     min = math.min(min, point);
+            //     max = math.max(max, point);
+            // }
+            // var size = max - min;
+
+            var LUT = new ValueTuple<ulong, uint>[points.Length];
+            var scale = 100000;
+            for (var p = 0; p < points.Length; p++) {
+                var point = points[p].xyz;
+                var val = MortonEncode3(new uint3(point * scale));
+                LUT[p] = new ValueTuple<ulong, uint>(val, (uint)p);
+            }
+            LUT = LUT.OrderBy((inp) => inp.Item1).ToArray();
+
+            var LUT_inv = new uint[LUT.Length];
+            for (var i = 0; i < LUT.Length; i++) {
+                LUT_inv[LUT[i].Item2] = (uint)i;
+            }
+
+            var adj_index = 0;
+            for (var p = 0; p < points.Length; p++) {
+                var old_index = (int)LUT[p].Item2;
+                var old_point = points[old_index];
+
+                var old_adj_from = old_index > 0 ? math.asuint(points[old_index - 1].w) : 0;
+                var old_adj_to = math.asuint(old_point.w);
+
+                for (var adj = old_adj_from; adj < old_adj_to; adj++) {
+                    re_adjacency[adj_index++] = LUT_inv[adjacency[(int)adj]];
+                }
+
+                re_points[p] = new float4(old_point.xyz, math.asfloat((uint)adj_index));
+                for (var a = 0; a < attribute_elem_size; a++) {
+                    re_attributes[p * attribute_elem_size + a] = attributes[old_index * attribute_elem_size + a];
+                }
+
+            }
+            positions_buffer.SetData(re_points);
+            shs_buffer.SetData(re_attributes);
+            adjacency_buffer.SetData(re_adjacency);
+            re_points.Dispose();
+            re_attributes.Dispose();
+            re_adjacency.Dispose();
+        } else {
+            positions_buffer.SetData(points);
+            shs_buffer.SetData(attributes);
+            adjacency_buffer.SetData(adjacency);
+        }
+
+        // {
+        //     // uint above = 0;
+        //     uint min = 10000, max = 0, total = 0;
+        //     uint offset_from = 0;
+        //     for (int i = 1; i < vertex_count; i++) {
+        //         var offset_to = math.asuint(points[i].w);
+        //         var count = offset_to - offset_from;
+
+        //         if (count > 30) {
+        //             total++;
+        //             expensive.Add(i);
+        //         }
+
+        //         min = math.min(min, count);
+        //         max = math.max(max, count);
+
+        //         offset_from = offset_to;
+        //     }
+
+        //     Debug.Log("Min " + min + "; Max " + max + "; Above thr " + total);
+        // }
 
         {
             var reduction_group_count = Mathf.CeilToInt(vertex_count / (float)FIND_CLOSEST_THREADS_PER_GROUP);
@@ -162,6 +273,7 @@ public class RadFoamCompute : MonoBehaviour
         //     }
         // }
 
+        // var world_to_model = Target.worldToLocalMatrix * Matrix4x4.Scale(new Vector3(1, -1, 1));
         // using (var model = Data.Load()) {
         //     var vertex_element = model.element_view("vertex");
         //     var adjacency_element = model.element_view("adjacency");
@@ -174,21 +286,23 @@ public class RadFoamCompute : MonoBehaviour
 
         //     Vector3 pos(int i)
         //     {
-        //         return new Vector3(x.Get<float>(i), y.Get<float>(i), z.Get<float>(i));
+        //         return world_to_model.MultiplyPoint(new Vector3(x.Get<float>(i), y.Get<float>(i), z.Get<float>(i)));
         //     }
 
-        //     for (var n = 0; n < 1; n++) {
+        //     // var n = 1969440;// 1981777;
+        //     for (var l = 0; l < expensive.Count; l++) {
+        //         var n = expensive[l];
         //         var zero = pos(n);
         //         var from = n > 0 ? o.Get<uint>(n - 1) : 0;
         //         var to = o.Get<uint>(n);
         //         for (var i = from; i < to; i++) {
         //             var other = a.Get<uint>((int)i);
-        //             Debug.Log(other);
+        //             // Debug.Log(other);
         //             Debug.DrawLine(zero, pos((int)other));
         //         }
         //     }
-        // }
 
+        // }
     }
 
     void OnRenderImage(RenderTexture srcRenderTex, RenderTexture outRenderTex)
@@ -240,7 +354,7 @@ public class RadFoamCompute : MonoBehaviour
             var kernel = radfoamShader.FindKernel("RadFoam");
             radfoamShader.SetTexture(kernel, "_srcTex", srcRenderTex);
             radfoamShader.SetTexture(kernel, "_outTex", tmp);
-            radfoamShader.SetTextureFromGlobal(kernel, "_CameraDepth", "_CameraDepthTexture");
+            // radfoamShader.SetTextureFromGlobal(kernel, "_CameraDepth", "_CameraDepthTexture");
             radfoamShader.SetMatrix("_Camera2WorldMatrix", world_to_model * camera.cameraToWorldMatrix);
             radfoamShader.SetMatrix("_InverseProjectionMatrix", camera.projectionMatrix.inverse);
             radfoamShader.SetFloat("_FisheyeFOV", fisheye_fov);
@@ -258,17 +372,6 @@ public class RadFoamCompute : MonoBehaviour
             Graphics.Blit(tmp, outRenderTex);
             RenderTexture.ReleaseTemporary(tmp);
         }
-    }
-
-    void OnDestroy()
-    {
-        positions_buffer?.Release();
-        shs_buffer?.Release();
-        adjacency_buffer?.Release();
-        adjacency_diff_buffer?.Release();
-
-        closest_index_buffer?.Release();
-        tmp_distance_buffer?.Release();
     }
 
     [BurstCompile]

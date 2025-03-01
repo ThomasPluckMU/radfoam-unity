@@ -7,28 +7,33 @@ using UnityEngine;
 
 public class RadFoam : MonoBehaviour
 {
-    public float fisheye_fov = 60;
-
-    public Transform Target;
     public PlyData Data;
+    public float fisheye_fov = 60;
+    public Transform Target;
+
 
     private Material blitMat;
-
-    private NativeArray<float4> points;
     private Texture2D positions_tex;
     private Texture2D attr_tex;
     private Texture2D adjacency_tex;
     private Texture2D adjacency_diff_tex;
 
+    private NativeArray<float4> points; // store this for finding the closest cell to the camera on the CPU
+
     void Start()
     {
         blitMat = new Material(Shader.Find("Hidden/Custom/RadFoamShader"));
-
-
         Load();
     }
 
-    void Load()
+    void OnDestroy()
+    {
+        points.Dispose();
+        Destroy(blitMat);
+    }
+
+
+    public void Load()
     {
         using var model = Data.Load();
 
@@ -112,11 +117,18 @@ public class RadFoam : MonoBehaviour
 
     void OnRenderImage(RenderTexture srcRenderTex, RenderTexture outRenderTex)
     {
+        if (points.Length == 0) {
+            Graphics.Blit(srcRenderTex, outRenderTex);
+            return;
+        }
+
         var camera = Camera.current;
 
         var world_to_model = Matrix4x4.Scale(new Vector3(1, -1, 1)) * Target.worldToLocalMatrix;
 
         {
+            // TODO: we could use some acceleration structure for finding the closest cell.. 
+            // but it's a few million points, a linear search should not be the bottleneck here (+the added memory for the acceleration structure)
             var local_camera_pos = world_to_model.MultiplyPoint3x4(camera.transform.position);
             using var closest = new NativeArray<uint>(1, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
             new FindClosest() { target = local_camera_pos, positions = points, closest = closest }.Schedule().Complete();
@@ -135,11 +147,6 @@ public class RadFoam : MonoBehaviour
 
             Graphics.Blit(srcRenderTex, outRenderTex, blitMat);
         }
-    }
-
-    void OnDestroy()
-    {
-        points.Dispose();
     }
 
     [BurstCompile]
@@ -202,7 +209,7 @@ public class RadFoam : MonoBehaviour
         [ReadOnly] public NativeArray<float4> positions;
         [ReadOnly] public NativeArray<uint> adjacency;
 
-        // NativeDisableParallelForRestriction may be bad here.. especially as it may run with user provided data, which may be invalid
+        // [NativeDisableParallelForRestriction] may be bad here.. especially as it may run with user provided data, which may be invalid
         [WriteOnly, NativeDisableParallelForRestriction] public NativeArray<half4> adjacency_diff;
 
         public void Execute(int index)

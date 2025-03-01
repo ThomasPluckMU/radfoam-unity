@@ -10,7 +10,6 @@ float _FisheyeFOV;
 float4x4 _Camera2WorldMatrix;
 float4x4 _InverseProjectionMatrix;
 
-Texture2D<float> _CameraDepth;
 Texture2D<float4> _srcTex;
 RWTexture2D<float4> _outTex;
 
@@ -61,12 +60,11 @@ struct Attr {
     uint harmonics[SH_BUF_LEN];
 };
 
-StructuredBuffer<uint> _start_index;
+StructuredBuffer<uint>   _start_index;
 StructuredBuffer<float4> _positions;
-StructuredBuffer<Attr> _shs;
-StructuredBuffer<half4> _adjacency_diff;
-StructuredBuffer<uint> _adjacency;
-
+StructuredBuffer<Attr>   _shs;
+StructuredBuffer<half4>  _adjacency_diff;
+StructuredBuffer<uint>   _adjacency;
 
 [numthreads(8, 8, 1)]
 void RadFoam (uint3 id : SV_DispatchThreadID)
@@ -84,9 +82,10 @@ void RadFoam (uint3 id : SV_DispatchThreadID)
         
         float2 pixelCoords = id.xy / float2(w, h) * 2 - 1;
 
-        float2 uv = float2((2.0f * x - 1.0f) * aspect_ratio,  2.0f * y - 1.0f);
-
-        ray = GetCameraRayFisheye(uv, _FisheyeFOV);
+        // float2 uv = float2((2.0f * x - 1.0f) * aspect_ratio,  2.0f * y - 1.0f);
+        // ray = GetCameraRayFisheye(uv, _FisheyeFOV);
+        float2 uv = float2((2.0f * x - 1.0f),  2.0f * y - 1.0f);
+        ray = GetCameraRay(uv);
     }
     float4 src_color = _srcTex[id.xy];
     if (dot(ray.direction, ray.direction) == 0) {
@@ -95,13 +94,10 @@ void RadFoam (uint3 id : SV_DispatchThreadID)
     }
     ray.direction = normalize(ray.direction);
 
-    // FIXME: this assumes the scene camera has the same camera model..
-    float scene_depth = LinearEyeDepth(_CameraDepth[id.xy]);
+    float scene_depth = 10000;
 
     float sh_coeffs[SH_DIM];
     sh_coefficients(ray.direction, sh_coeffs);
-
-    half3 diffs[CHUNK_SIZE];
 
     // tracing state
     uint cell = _start_index[0];
@@ -109,45 +105,47 @@ void RadFoam (uint3 id : SV_DispatchThreadID)
     float transmittance = 1.0f;
     float3 color = float3(0, 0, 0);
     float t_0 = 0.0f;
-    float4 cell_data = _positions[cell];
+
 
     int i = 0;
-    // for (; i < 8; i++) {
     for (; i < 256 && transmittance > 0.01; i++) {
         uint adj_from = cell > 0 ? asuint(_positions[cell - 1].w) : 0;
+        float4 cell_data = _positions[cell];
         uint adj_to = asuint(cell_data.w);
-        Attr attrs = _shs[cell];
-
+        
         float t_1 = scene_depth;
         uint next_face = 0xFFFFFFFF; 
 
         uint faces = adj_to - adj_from;
-        for (uint f = 0; f < faces; f += CHUNK_SIZE) {
 
+        half3 diffs[CHUNK_SIZE];
+        for (uint f = 0; f < faces; f += CHUNK_SIZE) {
             [unroll(CHUNK_SIZE)]
-            // [loop]
             for (uint a1 = 0; a1 < CHUNK_SIZE; a1++) {
                 diffs[a1] = (half3)_adjacency_diff[adj_from + f + a1].xyz;
             }
-
-            // [loop]
-            [unroll(CHUNK_SIZE)]
+            [loop]
             for (uint a2 = 0; a2 < CHUNK_SIZE; a2++) {
                 half3 diff = diffs[a2];
                 float denom = dot(diff, ray.direction);
                 float3 mid = cell_data.xyz + diff * 0.5f;
                 float t = dot(mid - ray.origin, diff) / denom;
-                bool valid = denom > 0 && t < t_1 && t > t_0 && f + a2 < faces;
+                bool valid = denom > 0 && t < t_1 && f + a2 < faces;
                 t_1 = valid ? t : t_1;
                 next_face = valid ? adj_from + f + a2 : next_face;
             }
         }
-
+ 
+        Attr attrs = _shs[cell];
         float alpha = 1.0 - exp(-f16tof32(attrs.density) * (t_1 - t_0));
         float weight = transmittance * alpha;
 
-        float3 rgb = load_sh_as_rgb(sh_coeffs, attrs.harmonics);
-        color += rgb * weight;
+        if (alpha > 0.01) {
+            // float3 rgb = float3((cell >> 0) & 0xFF, (cell >> 8) & 0xFF, (cell >> 16) & 0xFF) * (1.0 / 255.0);
+            float3 rgb = load_sh_as_rgb(sh_coeffs, attrs.harmonics);
+            color += rgb * weight;
+        }
+        
         transmittance = transmittance * (1.0 - alpha);
 
         if (next_face == 0xFFFFFFFF) {
@@ -156,15 +154,9 @@ void RadFoam (uint3 id : SV_DispatchThreadID)
 
         cell = _adjacency[next_face];
         t_0 = t_1;
-        cell_data = _positions[cell];
     }
 
-    // _outTex[id.xy] = float4(float3(
-    //             (cell >> 0) & 0xFF, 
-    //             (cell >> 8) & 0xFF, 
-    //             (cell >> 16) & 0xFF) * (1.0 / 255.0), 1);
     _outTex[id.xy] = float4(lerp(color, src_color.xyz, transmittance), 1);
-    // _outTex[id.xy] = float4(i / 256.0, i / 256.0, i / 256.0, 1);
 }
 
 

@@ -108,7 +108,7 @@ Shader "Hidden/Custom/RadFoamShader"
                 return tex2Dlod(_adjacency_diff_tex, float4(index_to_tex_buffer(i, _adjacency_tex_TexelSize.xy, 4096), 0, 0)).xyz;
             }
 
-            #define CHUNK_SIZE 4
+            #define CHUNK_SIZE 6
 
             fixed4 frag (blit_v2f input) : SV_Target
             {
@@ -130,11 +130,11 @@ Shader "Hidden/Custom/RadFoamShader"
                 float t_0 = 0.0f;
 
                 int i = 0;
-                for (; i < 256 && transmittance > 0.02; i++) {
+                for (; i < 200 && transmittance > 0.05; i++) {
                     float4 cell_data = positions_buff(cell);
                     uint adj_from = cell > 0 ? asuint(positions_buff(cell - 1).w) : 0;
-
                     uint adj_to = asuint(cell_data.w);
+
                     float4 attrs = attrs_buff(cell);
 
                     float t_1 = scene_depth;
@@ -144,13 +144,11 @@ Shader "Hidden/Custom/RadFoamShader"
                     for (uint f = 0; f < faces; f += CHUNK_SIZE) {
 
                         [unroll(CHUNK_SIZE)]
-                        // [loop]
                         for (uint a1 = 0; a1 < CHUNK_SIZE; a1++) {
                             diffs[a1] = adjacency_diff_buffer(adj_from + f + a1).xyz;
                         }
 
-                        // [loop]
-                        [unroll(CHUNK_SIZE)]
+                        [loop]
                         for (uint a2 = 0; a2 < CHUNK_SIZE; a2++) {
                             half3 diff = diffs[a2];
                             float denom = dot(diff, ray.direction);
@@ -163,8 +161,6 @@ Shader "Hidden/Custom/RadFoamShader"
                     }
 
                     float density = attrs.w;
-                    // density = density < _CutOff ? 0 : density;
-
                     float alpha = 1.0 - exp(-density * (t_1 - t_0));
                     float weight = transmittance * alpha;
 
