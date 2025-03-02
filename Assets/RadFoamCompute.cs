@@ -1,6 +1,4 @@
-using System;
 using System.Collections.Generic;
-using System.Linq;
 using Ply;
 using Unity.Burst;
 using Unity.Collections;
@@ -14,11 +12,13 @@ public class RadFoamCompute : MonoBehaviour
     public float fisheye_fov = 90;
 
     public Transform Target;
-    public PlyData Data;
+    public PlyData[] DataList;
 
     public ComputeShader radfoamShader;
     public ComputeShader closestShader;
 
+
+    // model data
     private GraphicsBuffer positions_buffer;
     private GraphicsBuffer shs_buffer;
     private GraphicsBuffer adjacency_buffer;
@@ -27,18 +27,17 @@ public class RadFoamCompute : MonoBehaviour
     private GraphicsBuffer closest_index_buffer;
     private GraphicsBuffer tmp_distance_buffer;
 
+    // viewer state 
+    private int debug_view = 0;
+    private int camera_model = 0;
+    private int current_model = -1;
+    private int current_sh_level = -1;
+    private bool current_morton_reorder = true;
+
 
     private const int SH_DEGREE_MAX = 3;
     private int SH_DIM(int degree) => (degree + 1) * (degree + 1);
     private const int FIND_CLOSEST_THREADS_PER_GROUP = 1024;
-
-    private List<int> expensive = new();
-
-    void Start()
-    {
-        using var model = Data.Load();
-        Load(model, 3);
-    }
 
     void OnDestroy()
     {
@@ -51,9 +50,17 @@ public class RadFoamCompute : MonoBehaviour
         tmp_distance_buffer?.Release();
     }
 
-    void Load(in Model model, int sh_degree)
+    void OnGUI()
     {
+        GUILayout.Label("Model (Left/right): " + current_model);
+        GUILayout.Label("Spherical Harmonics (Up/Down): " + current_sh_level);
+        GUILayout.Label("Morton reorder (R): " + current_morton_reorder);
+        GUILayout.Label("Debug view (D): " + debug_view);
+        GUILayout.Label("Camera Model (C): " + camera_model);
+    }
 
+    void Load(in Model model, int sh_degree, bool morton_reorder)
+    {
         for (int i = 1; i <= SH_DEGREE_MAX; i++) {
             var kw_compute = new LocalKeyword(radfoamShader, "SH_DEGREE_" + i);
             if (i == sh_degree) {
@@ -137,102 +144,58 @@ public class RadFoamCompute : MonoBehaviour
         shs_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertex_count, attribute_elem_size);
         adjacency_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, adjacency_count, sizeof(uint));
 
-        if (true) {
-            var re_points = new NativeArray<float4>(vertex_count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
-            var re_attributes = new NativeArray<byte>(vertex_count * attribute_elem_size, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
-            var re_adjacency = new NativeArray<uint>(adjacency_count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        if (morton_reorder) {
+            using var mapping = new NativeArray<MortonOrder.Data>(vertex_count, Allocator.TempJob, NativeArrayOptions.ClearMemory);
+            var handle = new MortonOrder() { points = points, map = mapping }.Schedule(vertex_count, 512);
+            handle.Complete();
 
+            // FIXME somehow SortJob- is insanely slow..
+            // handle = mapping.SortJob(new MortonOrder.Comparer()).Schedule(handle);
+            mapping.Sort(new MortonOrder.Comparer());
 
-            // Based on https://fgiesen.wordpress.com/2009/12/13/decoding-morton-codes/
-            // Insert two 0 bits after each of the 21 low bits of x
-            static ulong MortonPart1By2(ulong x)
-            {
-                x &= 0x1fffff;
-                x = (x ^ (x << 32)) & 0x1f00000000ffffUL;
-                x = (x ^ (x << 16)) & 0x1f0000ff0000ffUL;
-                x = (x ^ (x << 8)) & 0x100f00f00f00f00fUL;
-                x = (x ^ (x << 4)) & 0x10c30c30c30c30c3UL;
-                x = (x ^ (x << 2)) & 0x1249249249249249UL;
-                return x;
-            }
-            // Encode three 21-bit integers into 3D Morton order
-            static ulong MortonEncode3(uint3 v)
-            {
-                return (MortonPart1By2(v.z) << 2) | (MortonPart1By2(v.y) << 1) | MortonPart1By2(v.x);
-            }
+            using var mapping_inv = new NativeArray<uint>(vertex_count, Allocator.TempJob, NativeArrayOptions.ClearMemory);
+            handle = new InvertMapping() { mapping = mapping, mapping_inv = mapping_inv }.Schedule(vertex_count, 512, handle);
 
-            // var min = new float3(float.MaxValue);
-            // var max = new float3(float.MinValue);
-            // for (var p = 0; p < points.Length; p++) {
-            //     var point = points[p].xyz;
-            //     min = math.min(min, point);
-            //     max = math.max(max, point);
-            // }
-            // var size = max - min;
+            using var re_points = new NativeArray<float4>(vertex_count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+            using var re_attributes = new NativeArray<byte>(vertex_count * attribute_elem_size, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+            using var re_adjacency = new NativeArray<uint>(adjacency_count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
 
-            var LUT = new ValueTuple<ulong, uint>[points.Length];
-            var scale = 100000;
-            for (var p = 0; p < points.Length; p++) {
-                var point = points[p].xyz;
-                var val = MortonEncode3(new uint3(point * scale));
-                LUT[p] = new ValueTuple<ulong, uint>(val, (uint)p);
-            }
-            LUT = LUT.OrderBy((inp) => inp.Item1).ToArray();
+            handle = new Shuffle() {
+                points = points,
+                attributes = attributes,
+                adjacency = adjacency,
+                attribute_elem_size = attribute_elem_size,
+                mapping = mapping,
+                mapping_inv = mapping_inv,
+                shuffled_points = re_points,
+                shuffled_attributes = re_attributes,
+                shuffled_adjacency = re_adjacency,
+            }.Schedule(handle);
+            handle.Complete();
 
-            var LUT_inv = new uint[LUT.Length];
-            for (var i = 0; i < LUT.Length; i++) {
-                LUT_inv[LUT[i].Item2] = (uint)i;
-            }
-
-            var adj_index = 0;
-            for (var p = 0; p < points.Length; p++) {
-                var old_index = (int)LUT[p].Item2;
-                var old_point = points[old_index];
-
-                var old_adj_from = old_index > 0 ? math.asuint(points[old_index - 1].w) : 0;
-                var old_adj_to = math.asuint(old_point.w);
-
-                for (var adj = old_adj_from; adj < old_adj_to; adj++) {
-                    re_adjacency[adj_index++] = LUT_inv[adjacency[(int)adj]];
-                }
-
-                re_points[p] = new float4(old_point.xyz, math.asfloat((uint)adj_index));
-                for (var a = 0; a < attribute_elem_size; a++) {
-                    re_attributes[p * attribute_elem_size + a] = attributes[old_index * attribute_elem_size + a];
-                }
-
-            }
             positions_buffer.SetData(re_points);
             shs_buffer.SetData(re_attributes);
             adjacency_buffer.SetData(re_adjacency);
-            re_points.Dispose();
-            re_attributes.Dispose();
-            re_adjacency.Dispose();
         } else {
             positions_buffer.SetData(points);
             shs_buffer.SetData(attributes);
             adjacency_buffer.SetData(adjacency);
         }
 
-        // {
-        //     // uint above = 0;
+        // {    // some diagnostics
         //     uint min = 10000, max = 0, total = 0;
         //     uint offset_from = 0;
         //     for (int i = 1; i < vertex_count; i++) {
         //         var offset_to = math.asuint(points[i].w);
         //         var count = offset_to - offset_from;
-
         //         if (count > 30) {
         //             total++;
         //             expensive.Add(i);
         //         }
-
         //         min = math.min(min, count);
         //         max = math.max(max, count);
-
         //         offset_from = offset_to;
         //     }
-
         //     Debug.Log("Min " + min + "; Max " + max + "; Above thr " + total);
         // }
 
@@ -264,7 +227,27 @@ public class RadFoamCompute : MonoBehaviour
 
     void Update()
     {
-        fisheye_fov = Mathf.Clamp(fisheye_fov + Input.mouseScrollDelta.y * -4, 10, 120);
+        if (Input.GetKeyDown(KeyCode.C)) {
+            camera_model = camera_model == 0 ? 1 : 0;
+        }
+        fisheye_fov = math.clamp(fisheye_fov + Input.mouseScrollDelta.y * -4, 10, 120);
+        debug_view = Input.GetKey(KeyCode.D) ? 1 : 0;
+
+
+        var model_index = math.clamp(current_model + (Input.GetKeyDown(KeyCode.RightArrow) ? 1 : 0) + (Input.GetKeyDown(KeyCode.LeftArrow) ? -1 : 0), 0, DataList.Length);
+        var sh_level = math.clamp(current_sh_level + (Input.GetKeyDown(KeyCode.UpArrow) ? 1 : 0) + (Input.GetKeyDown(KeyCode.DownArrow) ? -1 : 0), 0, SH_DEGREE_MAX);
+        var morton_reorder = Input.GetKeyDown(KeyCode.R) ? !current_morton_reorder : current_morton_reorder;
+
+        if (current_sh_level != sh_level || morton_reorder != current_morton_reorder || model_index != current_model) {
+            OnDestroy(); // destroy previous data
+            {
+                using var model = DataList[model_index].Load();
+                Load(model, sh_level, morton_reorder);
+            }
+            current_model = model_index;
+            current_sh_level = sh_level;
+            current_morton_reorder = morton_reorder;
+        }
 
         // if (Input.GetKeyDown(KeyCode.Return)) {
         //     OnDestroy();
@@ -273,23 +256,20 @@ public class RadFoamCompute : MonoBehaviour
         //     }
         // }
 
+        // Debugging the voronoi graph
         // var world_to_model = Target.worldToLocalMatrix * Matrix4x4.Scale(new Vector3(1, -1, 1));
         // using (var model = Data.Load()) {
         //     var vertex_element = model.element_view("vertex");
         //     var adjacency_element = model.element_view("adjacency");
-
         //     var x = vertex_element.property_view("x");
         //     var y = vertex_element.property_view("y");
         //     var z = vertex_element.property_view("z");
         //     var o = vertex_element.property_view("adjacency_offset");
         //     var a = adjacency_element.property_view("adjacency");
-
         //     Vector3 pos(int i)
         //     {
         //         return world_to_model.MultiplyPoint(new Vector3(x.Get<float>(i), y.Get<float>(i), z.Get<float>(i)));
         //     }
-
-        //     // var n = 1969440;// 1981777;
         //     for (var l = 0; l < expensive.Count; l++) {
         //         var n = expensive[l];
         //         var zero = pos(n);
@@ -357,7 +337,9 @@ public class RadFoamCompute : MonoBehaviour
             // radfoamShader.SetTextureFromGlobal(kernel, "_CameraDepth", "_CameraDepthTexture");
             radfoamShader.SetMatrix("_Camera2WorldMatrix", world_to_model * camera.cameraToWorldMatrix);
             radfoamShader.SetMatrix("_InverseProjectionMatrix", camera.projectionMatrix.inverse);
+            radfoamShader.SetFloat("_CameraModel", camera_model);
             radfoamShader.SetFloat("_FisheyeFOV", fisheye_fov);
+            radfoamShader.SetInt("_DebugView", debug_view);
 
             radfoamShader.SetBuffer(kernel, "_start_index", closest_index_buffer);
             radfoamShader.SetBuffer(kernel, "_positions", positions_buffer);
@@ -371,6 +353,102 @@ public class RadFoamCompute : MonoBehaviour
 
             Graphics.Blit(tmp, outRenderTex);
             RenderTexture.ReleaseTemporary(tmp);
+        }
+    }
+
+    [BurstCompile]
+    struct MortonOrder : IJobParallelFor
+    {
+        public struct Comparer : IComparer<Data>
+        {
+            int IComparer<Data>.Compare(Data x, Data y)
+            {
+                return x.order.CompareTo(y.order);
+            }
+        }
+
+        public struct Data
+        {
+            public ulong order;
+            public uint index;
+        }
+        [ReadOnly] public NativeArray<float4> points;
+        [WriteOnly] public NativeArray<Data> map;
+
+        // Based on https://fgiesen.wordpress.com/2009/12/13/decoding-morton-codes/ 
+        // Insert two 0 bits after each of the 21 low bits of x
+        static ulong MortonPart1By2(ulong x)
+        {
+            x &= 0x1fffff;
+            x = (x ^ (x << 32)) & 0x1f00000000ffffUL;
+            x = (x ^ (x << 16)) & 0x1f0000ff0000ffUL;
+            x = (x ^ (x << 8)) & 0x100f00f00f00f00fUL;
+            x = (x ^ (x << 4)) & 0x10c30c30c30c30c3UL;
+            x = (x ^ (x << 2)) & 0x1249249249249249UL;
+            return x;
+        }
+
+        static ulong MortonEncode3(uint3 v)
+        {   // Encode three 21-bit integers into 3D Morton order
+            return (MortonPart1By2(v.z) << 2) | (MortonPart1By2(v.y) << 1) | MortonPart1By2(v.x);
+        }
+
+        public void Execute(int index)
+        {
+            var scale = 1000;
+            map[index] = new Data {
+                order = MortonEncode3(new uint3(points[index].xyz * scale)),
+                index = (uint)index
+            };
+        }
+    }
+
+    [BurstCompile]
+    struct InvertMapping : IJobParallelFor
+    {
+        [ReadOnly] public NativeArray<MortonOrder.Data> mapping;
+        [WriteOnly, NativeDisableParallelForRestriction] public NativeArray<uint> mapping_inv;
+
+        public void Execute(int index)
+        {
+            mapping_inv[(int)mapping[index].index] = (uint)index;
+        }
+    }
+
+    [BurstCompile]
+    struct Shuffle : IJob
+    {
+        [ReadOnly] public NativeArray<float4> points;
+        [ReadOnly] public NativeArray<byte> attributes;
+        [ReadOnly] public NativeArray<uint> adjacency;
+        public int attribute_elem_size;
+        [ReadOnly] public NativeArray<MortonOrder.Data> mapping;
+        [ReadOnly] public NativeArray<uint> mapping_inv;
+        [WriteOnly] public NativeArray<float4> shuffled_points;
+        [WriteOnly] public NativeArray<byte> shuffled_attributes;
+        [WriteOnly] public NativeArray<uint> shuffled_adjacency;
+
+        public void Execute()
+        {
+            var adj_index = 0;
+            for (var p = 0; p < points.Length; p++) {
+                var old_index = (int)mapping[p].index;
+                var old_point = points[old_index];
+
+                var old_adj_from = old_index > 0 ? math.asuint(points[old_index - 1].w) : 0;
+                var old_adj_to = math.asuint(old_point.w);
+
+                for (var adj = old_adj_from; adj < old_adj_to; adj++) {
+                    shuffled_adjacency[adj_index++] = mapping_inv[(int)adjacency[(int)adj]];
+                }
+
+                shuffled_points[p] = new float4(old_point.xyz, math.asfloat((uint)adj_index));  // update the adjacency offset to the shuffled version
+                // shuffled_attributes.Slice()
+                // NativeSlice.Copy() ?
+                for (var a = 0; a < attribute_elem_size; a++) {
+                    shuffled_attributes[p * attribute_elem_size + a] = attributes[old_index * attribute_elem_size + a];
+                }
+            }
         }
     }
 

@@ -6,9 +6,11 @@
 #include "UnityCG.cginc"
 #include "sh_utils.cginc"
 
-float _FisheyeFOV;
 float4x4 _Camera2WorldMatrix;
 float4x4 _InverseProjectionMatrix;
+int _CameraModel;
+float _FisheyeFOV;
+int _DebugView;
 
 Texture2D<float4> _srcTex;
 RWTexture2D<float4> _outTex;
@@ -80,12 +82,13 @@ void RadFoam (uint3 id : SV_DispatchThreadID)
         float x = id.x / (float)w;
         float y = id.y / (float)h;
         
-        float2 pixelCoords = id.xy / float2(w, h) * 2 - 1;
-
-        // float2 uv = float2((2.0f * x - 1.0f) * aspect_ratio,  2.0f * y - 1.0f);
-        // ray = GetCameraRayFisheye(uv, _FisheyeFOV);
-        float2 uv = float2((2.0f * x - 1.0f),  2.0f * y - 1.0f);
-        ray = GetCameraRay(uv);
+        if (_CameraModel == 1) {
+            float2 uv = float2((2.0f * x - 1.0f) * aspect_ratio,  2.0f * y - 1.0f);
+            ray = GetCameraRayFisheye(uv, _FisheyeFOV);
+        } else {
+            float2 uv = float2((2.0f * x - 1.0f),  2.0f * y - 1.0f);
+            ray = GetCameraRay(uv);
+        }
     }
     float4 src_color = _srcTex[id.xy];
     if (dot(ray.direction, ray.direction) == 0) {
@@ -142,7 +145,12 @@ void RadFoam (uint3 id : SV_DispatchThreadID)
 
         if (alpha > 0.01) {
             // float3 rgb = float3((cell >> 0) & 0xFF, (cell >> 8) & 0xFF, (cell >> 16) & 0xFF) * (1.0 / 255.0);
-            float3 rgb = load_sh_as_rgb(sh_coeffs, attrs.harmonics);
+            float3 rgb;
+            if (_DebugView == 1) {
+                rgb = sin(float3((cell >> 0), (cell >> 4), (cell >> 8)) * (1.0 / 1024));
+            } else {
+                rgb = load_sh_as_rgb(sh_coeffs, attrs.harmonics);
+            }
             color += rgb * weight;
         }
         
