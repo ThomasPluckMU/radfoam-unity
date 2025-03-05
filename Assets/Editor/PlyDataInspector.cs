@@ -1,9 +1,4 @@
-// Pcx - Point cloud importer & renderer for Unity
-// https://github.com/keijiro/Pcx
-
-
 using UnityEditor;
-
 
 namespace Ply
 {
@@ -12,9 +7,7 @@ namespace Ply
     {
         public override void OnInspectorGUI()
         {
-            // var count = ((PlyData)target).;
-            // EditorGUILayout.LabelField("Point Count", count.ToString("N0"));
-            EditorGUILayout.LabelField("PlyData");
+            EditorGUILayout.PropertyField(serializedObject.FindProperty("elements"));
         }
     }
 }

@@ -19,7 +19,7 @@ namespace Ply
             }
         }
 
-        const int READ_BUFFER_SIZE = 1024 * 1024 * 8; // 8 MB
+        const int READ_BUFFER_SIZE = 1024 * 1024 * 32;
 
         PlyData ImportPly(string path)
         {
