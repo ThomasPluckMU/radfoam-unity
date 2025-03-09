@@ -12,6 +12,8 @@ int _CameraModel;
 float _FisheyeFOV;
 int _DebugView;
 
+int _TestAlgo;
+
 Texture2D<float4> _srcTex;
 RWTexture2D<float4> _outTex;
 
@@ -68,15 +70,29 @@ StructuredBuffer<Attr>   _shs;
 StructuredBuffer<half4>  _adjacency_diff;
 StructuredBuffer<uint>   _adjacency;
 
-[numthreads(8, 8, 1)]
-void RadFoam (uint3 id : SV_DispatchThreadID)
+#define GROUP_SIZE 8
+#define GROUP_SIZE_X 1
+#define GROUP_CACHE (GROUP_SIZE * GROUP_SIZE * GROUP_SIZE_X)
+
+groupshared uint group_cell;
+groupshared float4 group_cell_data;
+groupshared Attr group_attrs;
+groupshared uint group_adj_from;
+groupshared uint group_adj_count;
+groupshared half3 group_diffs[GROUP_SIZE * GROUP_SIZE * GROUP_SIZE_X]; // FIXME: what if a cell has more than GROUP_SIZE * GROUP_SIZE adj?
+groupshared bool break_group;
+
+[numthreads(GROUP_SIZE, GROUP_SIZE, 1)]
+void RadFoam (uint3 id : SV_DispatchThreadID, uint group_index : SV_GroupIndex)
 {
+    bool ignore = false;
     Ray ray;
     {
         uint w, h;
         _outTex.GetDimensions(w, h);
-        if (id.x > w || id.y > h)
-            return;
+        if (id.x > w || id.y > h) {
+            ignore = true;
+        }
 
         float aspect_ratio = (float)w / (float)h;
         float x = id.x / (float)w;
@@ -92,8 +108,9 @@ void RadFoam (uint3 id : SV_DispatchThreadID)
     }
     float4 src_color = _srcTex[id.xy];
     if (dot(ray.direction, ray.direction) == 0) {
-        _outTex[id.xy] = src_color;
-        return; // fisheye fov too large
+        ignore = true;
+        // _outTex[id.xy] = src_color;
+        // return; // fisheye fov too large
     }
     ray.direction = normalize(ray.direction);
 
@@ -109,9 +126,97 @@ void RadFoam (uint3 id : SV_DispatchThreadID)
     float3 color = float3(0, 0, 0);
     float t_0 = 0.0f;
 
-
     int i = 0;
-    for (; i < 256 && transmittance > 0.01; i++) {
+
+    if (_TestAlgo == 1){
+        if (group_index == 0) {
+            break_group = false;
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        for (; i < 256 && !break_group; i++) {
+            if (group_index == 0) {
+                group_cell = cell;
+                group_attrs = _shs[cell];
+                group_cell_data = _positions[cell];
+                group_adj_from = cell > 0 ? asuint(_positions[cell - 1].w) : 0;
+                group_adj_count = min(GROUP_CACHE, asuint(group_cell_data.w) - group_adj_from);
+            }
+            GroupMemoryBarrierWithGroupSync();
+
+            [unroll(GROUP_SIZE_X)]
+            for (int g = 0; g < GROUP_SIZE_X; g++) {
+                int index = g * (GROUP_SIZE * GROUP_SIZE) + group_index;
+                group_diffs[index] = (half3) _adjacency_diff[group_adj_from + index].xyz;
+            }
+
+            // if (group_index < group_adj_count) {
+            //     group_diffs[group_index] = (half3) _adjacency_diff[group_adj_from + group_index].xyz;
+            // }
+            GroupMemoryBarrierWithGroupSync();   
+
+            if (group_cell == cell) {
+                float t_1 = scene_depth;
+                uint next_face = 0xFFFFFFFF; 
+                [loop]
+                for (uint f = 0; f < group_adj_count; f++) { 
+                    float3 diff = group_diffs[f].xyz;
+                    float denom = dot(diff, ray.direction);
+                    float3 mid = group_cell_data.xyz + diff * 0.5f;
+                    float t = dot(mid - ray.origin, diff) / denom;
+                    bool valid = denom > 0 && t < t_1;
+                    t_1 = valid ? t : t_1;
+                    next_face = valid ? group_adj_from + f : next_face;
+                }
+
+                float alpha = 1.0 - exp(-f16tof32(group_attrs.density) * (t_1 - t_0));
+                float weight = transmittance * alpha;
+
+                if (alpha > 0.01) {
+                    float3 rgb;
+                    if (_DebugView == 1) {
+                        rgb = sin(float3((cell >> 0), (cell >> 4), (cell >> 8)) * (1.0 / 1024));
+                    } else {
+                        rgb = load_sh_as_rgb(sh_coeffs, group_attrs.harmonics);
+                    }
+                    color += rgb * weight;
+                }
+                
+                transmittance = transmittance * (1.0 - alpha);
+
+                bool should_continue = transmittance > 0.01 && next_face != 0xFFFFFFFF;
+                cell = should_continue ? _adjacency[next_face] : 0xFFFFFFFF;
+                t_0 = should_continue ? t_1 : t_0;
+
+                if (!should_continue) {
+                    break_group = true;
+                }
+            } else {
+                break_group = true;
+            }
+
+            GroupMemoryBarrierWithGroupSync(); 
+
+            // if (group_index == 0) {
+            //     bool all_in_sync = group_cell != 0xFFFFFFFF;
+            //     [unroll(63)]
+            //     for (int g = 1; g < 64; g++) {
+            //         all_in_sync = all_in_sync && group_continue[g];
+            //     }
+            //     break_group = !all_in_sync;
+            // }
+
+            // GroupMemoryBarrierWithGroupSync(); 
+        }
+    }
+
+    if (ignore) {
+        return;
+    }
+    // _outTex[id.xy] = float4(float3(i,i,i) * 0.01, 1);
+    // return;
+
+    for (; i < 256 && transmittance > 0.01 && cell != 0xFFFFFFFF; i++) {
         uint adj_from = cell > 0 ? asuint(_positions[cell - 1].w) : 0;
         float4 cell_data = _positions[cell];
         uint adj_to = asuint(cell_data.w);
@@ -155,15 +260,9 @@ void RadFoam (uint3 id : SV_DispatchThreadID)
         }
         
         transmittance = transmittance * (1.0 - alpha);
-
-        if (next_face == 0xFFFFFFFF) {
-            break;
-        }
-
-        cell = _adjacency[next_face];
+        cell = next_face != 0xFFFFFFFF ? _adjacency[next_face] : 0xFFFFFFFF;
         t_0 = t_1;
     }
-
     _outTex[id.xy] = float4(lerp(color, src_color.xyz, transmittance), 1);
 }
 

@@ -34,6 +34,7 @@ public class RadFoamCompute : MonoBehaviour
     private int current_model = -1;
     private int current_sh_level = -1;
     private bool current_morton_reorder = true;
+    private int test_algo = 0;
 
 
     private const int SH_DEGREE_MAX = 3;
@@ -250,6 +251,8 @@ public class RadFoamCompute : MonoBehaviour
             current_morton_reorder = morton_reorder;
         }
 
+        test_algo = Input.GetKey(KeyCode.A) ? 1 : 0;
+
         // if (Input.GetKeyDown(KeyCode.Return)) {
         //     OnDestroy();
         //     using (var model = Model.from_file("C:/Users/Chris/Downloads/scene(3).ply")) {
@@ -341,6 +344,7 @@ public class RadFoamCompute : MonoBehaviour
             radfoamShader.SetFloat("_CameraModel", camera_model);
             radfoamShader.SetFloat("_FisheyeFOV", fisheye_fov);
             radfoamShader.SetInt("_DebugView", debug_view);
+            radfoamShader.SetInt("_TestAlgo", test_algo);
 
             radfoamShader.SetBuffer(kernel, "_start_index", closest_index_buffer);
             radfoamShader.SetBuffer(kernel, "_positions", positions_buffer);
@@ -348,8 +352,9 @@ public class RadFoamCompute : MonoBehaviour
             radfoamShader.SetBuffer(kernel, "_adjacency", adjacency_buffer);
             radfoamShader.SetBuffer(kernel, "_adjacency_diff", adjacency_diff_buffer);
 
-            int gridSizeX = Mathf.CeilToInt(srcRenderTex.width / 8.0f);
-            int gridSizeY = Mathf.CeilToInt(srcRenderTex.height / 8.0f);
+            int size = 8;
+            int gridSizeX = Mathf.CeilToInt(srcRenderTex.width / (float)size);
+            int gridSizeY = Mathf.CeilToInt(srcRenderTex.height / (float)size);
             radfoamShader.Dispatch(kernel, gridSizeX, gridSizeY, 1);
 
             Graphics.Blit(tmp, outRenderTex);
