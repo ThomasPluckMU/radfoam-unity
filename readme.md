@@ -26,9 +26,6 @@ Pre-trained models from the original authors:
 
 [Radiant Foam: Real-Time Differentiable Ray Tracing](https://radfoam.github.io/)
 
-## Known Issues
-
-- colors still seem washed out compared to the original paper
-- not sure if performance is up to par with the original CUDA implementation, as I could not get it running locally yet (getting around 25-50fps on my RTX 3070, depending on view point)
+Not sure if performance is up to par with the original CUDA implementation, as I could not get it running locally yet (getting around 25-50fps on my RTX 3070, depending on view point).
 
 ¯\\\_(ツ)\_/¯

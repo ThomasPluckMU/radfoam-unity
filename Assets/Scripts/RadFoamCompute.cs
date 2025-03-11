@@ -332,7 +332,7 @@ public class RadFoamCompute : MonoBehaviour
         {
             var descriptor = srcRenderTex.descriptor;
             descriptor.enableRandomWrite = true;
-            descriptor.sRGB = false;
+            descriptor.sRGB = true;
             var tmp = RenderTexture.GetTemporary(descriptor);
 
             var kernel = radfoamShader.FindKernel("RadFoam");

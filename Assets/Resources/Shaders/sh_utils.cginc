@@ -21,7 +21,7 @@ void sh_coefficients(float3 dir, out float sh[SH_DIM]) {
     float y = dir.y;
     float z = dir.z;
 
-    sh[0] = C0 + 0.5; // the original code adds this 0.5 in load_sh_as_rgb, but somehow this gives wrong results for me..
+    sh[0] = 0.5f + C0; // the original code adds this 0.5 in load_sh_as_rgb, but somehow this gives wrong results for me..
 
     if (SH_DEGREE > 0) {
         sh[1] = -C1 * y;
@@ -49,7 +49,7 @@ void sh_coefficients(float3 dir, out float sh[SH_DIM]) {
 }
 
 float3 load_sh_as_rgb(float coeffs[SH_DIM], uint harmonics[SH_BUF_LEN]) {
-    float3 rgb = float3(0.0f, 0.0f, 0.0f);
+    float3 rgb = float3(0.5f, 0.5f, 0.5f) * 0;
 
     [unroll(SH_DIM)]
     for (uint i = 0; i < SH_DIM; i++) {
@@ -67,7 +67,7 @@ float3 load_sh_as_rgb(float coeffs[SH_DIM], uint harmonics[SH_BUF_LEN]) {
             uint b = harmonics[i * 2];
             unpacked = float3(f16tof32(a), f16tof32(a >> 16), f16tof32(b));
         }
-        rgb += coeffs[i] * unpacked;
+        rgb += coeffs[i] * unpacked; 
     }
 
     return max(0, rgb);

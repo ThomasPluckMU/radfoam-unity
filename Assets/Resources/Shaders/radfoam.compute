@@ -71,16 +71,15 @@ StructuredBuffer<half4>  _adjacency_diff;
 StructuredBuffer<uint>   _adjacency;
 
 #define GROUP_SIZE 8
-#define GROUP_SIZE_X 1
-#define GROUP_CACHE (GROUP_SIZE * GROUP_SIZE * GROUP_SIZE_X)
-
-groupshared uint group_cell;
-groupshared float4 group_cell_data;
-groupshared Attr group_attrs;
-groupshared uint group_adj_from;
-groupshared uint group_adj_count;
-groupshared half3 group_diffs[GROUP_SIZE * GROUP_SIZE * GROUP_SIZE_X]; // FIXME: what if a cell has more than GROUP_SIZE * GROUP_SIZE adj?
-groupshared bool break_group;
+// #define GROUP_SIZE_X 1
+// #define GROUP_CACHE (GROUP_SIZE * GROUP_SIZE * GROUP_SIZE_X)
+// groupshared uint group_cell;
+// groupshared float4 group_cell_data;
+// groupshared Attr group_attrs;
+// groupshared uint group_adj_from;
+// groupshared uint group_adj_count;
+// groupshared half3 group_diffs[GROUP_CACHE]; // FIXME: what if a cell has more than GROUP_SIZE * GROUP_SIZE adj?
+// groupshared bool break_group;
 
 [numthreads(GROUP_SIZE, GROUP_SIZE, 1)]
 void RadFoam (uint3 id : SV_DispatchThreadID, uint group_index : SV_GroupIndex)
@@ -128,93 +127,81 @@ void RadFoam (uint3 id : SV_DispatchThreadID, uint group_index : SV_GroupIndex)
 
     int i = 0;
 
-    if (_TestAlgo == 1){
-        if (group_index == 0) {
-            break_group = false;
-        }
-        GroupMemoryBarrierWithGroupSync();
+    // Trying to be smart, sharing data within a thread group, but does not seem to make a difference..
+    // if (_TestAlgo == 1){
+    //     if (group_index == 0) {
+    //         break_group = false;
+    //     }
+    //     GroupMemoryBarrierWithGroupSync();
 
-        for (; i < 256 && !break_group; i++) {
-            if (group_index == 0) {
-                group_cell = cell;
-                group_attrs = _shs[cell];
-                group_cell_data = _positions[cell];
-                group_adj_from = cell > 0 ? asuint(_positions[cell - 1].w) : 0;
-                group_adj_count = min(GROUP_CACHE, asuint(group_cell_data.w) - group_adj_from);
-            }
-            GroupMemoryBarrierWithGroupSync();
+    //     for (; i < 256 && !break_group; i++) {
+    //         if (group_index == 0) {
+    //             group_cell = cell;
+    //             group_attrs = _shs[cell];
+    //             group_cell_data = _positions[cell];
+    //             group_adj_from = cell > 0 ? asuint(_positions[cell - 1].w) : 0;
+    //             group_adj_count = min(GROUP_CACHE, asuint(group_cell_data.w) - group_adj_from);
+    //         }
+    //         GroupMemoryBarrierWithGroupSync();
 
-            [unroll(GROUP_SIZE_X)]
-            for (int g = 0; g < GROUP_SIZE_X; g++) {
-                int index = g * (GROUP_SIZE * GROUP_SIZE) + group_index;
-                group_diffs[index] = (half3) _adjacency_diff[group_adj_from + index].xyz;
-            }
+    //         [unroll(GROUP_SIZE_X)]
+    //         for (int g = 0; g < GROUP_SIZE_X; g++) {
+    //             int index = g * (GROUP_SIZE * GROUP_SIZE) + group_index;
+    //             group_diffs[index] = (half3) _adjacency_diff[group_adj_from + index].xyz;
+    //         }
 
-            // if (group_index < group_adj_count) {
-            //     group_diffs[group_index] = (half3) _adjacency_diff[group_adj_from + group_index].xyz;
-            // }
-            GroupMemoryBarrierWithGroupSync();   
+    //         // if (group_index < group_adj_count) {
+    //         //     group_diffs[group_index] = (half3) _adjacency_diff[group_adj_from + group_index].xyz;
+    //         // }
+    //         GroupMemoryBarrierWithGroupSync();   
 
-            if (group_cell == cell) {
-                float t_1 = scene_depth;
-                uint next_face = 0xFFFFFFFF; 
-                [loop]
-                for (uint f = 0; f < group_adj_count; f++) { 
-                    float3 diff = group_diffs[f].xyz;
-                    float denom = dot(diff, ray.direction);
-                    float3 mid = group_cell_data.xyz + diff * 0.5f;
-                    float t = dot(mid - ray.origin, diff) / denom;
-                    bool valid = denom > 0 && t < t_1;
-                    t_1 = valid ? t : t_1;
-                    next_face = valid ? group_adj_from + f : next_face;
-                }
+    //         if (group_cell == cell) {
+    //             float t_1 = scene_depth;
+    //             uint next_face = 0xFFFFFFFF; 
+    //             [loop]
+    //             for (uint f = 0; f < group_adj_count; f++) { 
+    //                 float3 diff = group_diffs[f].xyz;
+    //                 float denom = dot(diff, ray.direction);
+    //                 float3 mid = group_cell_data.xyz + diff * 0.5f;
+    //                 float t = dot(mid - ray.origin, diff) / denom;
+    //                 bool valid = denom > 0 && t < t_1;
+    //                 t_1 = valid ? t : t_1;
+    //                 next_face = valid ? group_adj_from + f : next_face;
+    //             }
 
-                float alpha = 1.0 - exp(-f16tof32(group_attrs.density) * (t_1 - t_0));
-                float weight = transmittance * alpha;
+    //             float alpha = 1.0 - exp(-f16tof32(group_attrs.density) * (t_1 - t_0));
+    //             float weight = transmittance * alpha;
 
-                if (alpha > 0.01) {
-                    float3 rgb;
-                    if (_DebugView == 1) {
-                        rgb = sin(float3((cell >> 0), (cell >> 4), (cell >> 8)) * (1.0 / 1024));
-                    } else {
-                        rgb = load_sh_as_rgb(sh_coeffs, group_attrs.harmonics);
-                    }
-                    color += rgb * weight;
-                }
+    //             if (alpha > 0.001) {
+    //                 float3 rgb;
+    //                 if (_DebugView == 1) {
+    //                     rgb = sin(float3((cell >> 0), (cell >> 4), (cell >> 8)) * (1.0 / 1024)) * 0.5 + 0.5;
+    //                 } else {
+    //                     rgb = load_sh_as_rgb(sh_coeffs, group_attrs.harmonics);
+    //                 }
+    //                 color += rgb * weight;
+    //             }
                 
-                transmittance = transmittance * (1.0 - alpha);
+    //             transmittance = transmittance * (1.0 - alpha);
 
-                bool should_continue = transmittance > 0.01 && next_face != 0xFFFFFFFF;
-                cell = should_continue ? _adjacency[next_face] : 0xFFFFFFFF;
-                t_0 = should_continue ? t_1 : t_0;
+    //             bool should_continue = transmittance > 0.01 && next_face != 0xFFFFFFFF;
+    //             cell = should_continue ? _adjacency[next_face] : 0xFFFFFFFF;
+    //             t_0 = should_continue ? t_1 : t_0;
 
-                if (!should_continue) {
-                    break_group = true;
-                }
-            } else {
-                break_group = true;
-            }
+    //             if (!should_continue) {
+    //                 break_group = true;
+    //             }
+    //         } else {
+    //             break_group = true;
+    //         }
 
-            GroupMemoryBarrierWithGroupSync(); 
-
-            // if (group_index == 0) {
-            //     bool all_in_sync = group_cell != 0xFFFFFFFF;
-            //     [unroll(63)]
-            //     for (int g = 1; g < 64; g++) {
-            //         all_in_sync = all_in_sync && group_continue[g];
-            //     }
-            //     break_group = !all_in_sync;
-            // }
-
-            // GroupMemoryBarrierWithGroupSync(); 
-        }
-    }
+    //         GroupMemoryBarrierWithGroupSync(); 
+    //     }
+    // }
 
     if (ignore) {
         return;
     }
-    // _outTex[id.xy] = float4(float3(i,i,i) * 0.01, 1);
-    // return;
 
     for (; i < 256 && transmittance > 0.01 && cell != 0xFFFFFFFF; i++) {
         uint adj_from = cell > 0 ? asuint(_positions[cell - 1].w) : 0;
@@ -252,7 +239,7 @@ void RadFoam (uint3 id : SV_DispatchThreadID, uint group_index : SV_GroupIndex)
             // float3 rgb = float3((cell >> 0) & 0xFF, (cell >> 8) & 0xFF, (cell >> 16) & 0xFF) * (1.0 / 255.0);
             float3 rgb;
             if (_DebugView == 1) {
-                rgb = sin(float3((cell >> 0), (cell >> 4), (cell >> 8)) * (1.0 / 1024));
+                rgb = sin(float3((cell >> 0), (cell >> 4), (cell >> 8)) * (1.0 / 1024)) * 0.5 + 0.5;
             } else {
                 rgb = load_sh_as_rgb(sh_coeffs, attrs.harmonics);
             }
@@ -263,6 +250,7 @@ void RadFoam (uint3 id : SV_DispatchThreadID, uint group_index : SV_GroupIndex)
         cell = next_face != 0xFFFFFFFF ? _adjacency[next_face] : 0xFFFFFFFF;
         t_0 = t_1;
     }
+    color = pow(color, 2.2f); // fix color..
     _outTex[id.xy] = float4(lerp(color, src_color.xyz, transmittance), 1);
 }
 
@@ -281,8 +269,8 @@ void BuildAdjDiff (uint3 id : SV_DispatchThreadID)
 
     float3 cell_pos = _positions[cell].xyz;
 
-    uint adj_from = cell > 0 ? asuint(_positions[cell - 1].w) : 0; //cell > 0 ? _adjacency_offset[cell - 1] : 0;
-    uint adj_to = asuint(_positions[cell].w); //_adjacency_offset[cell];
+    uint adj_from = cell > 0 ? asuint(_positions[cell - 1].w) : 0;
+    uint adj_to = asuint(_positions[cell].w);
 
     for (uint a = adj_from; a < adj_to; a++) {
         uint adj = _adjacency[a];
