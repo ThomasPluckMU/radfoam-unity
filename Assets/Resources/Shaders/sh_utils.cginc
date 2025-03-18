@@ -21,7 +21,7 @@ void sh_coefficients(float3 dir, out float sh[SH_DIM]) {
     float y = dir.y;
     float z = dir.z;
 
-    sh[0] = 0.5f + C0; // the original code adds this 0.5 in load_sh_as_rgb, but somehow this gives wrong results for me..
+    sh[0] = 1; // should actually be C0, but see comment in `load_sh_as_rgb`
 
     if (SH_DEGREE > 0) {
         sh[1] = -C1 * y;
@@ -49,7 +49,7 @@ void sh_coefficients(float3 dir, out float sh[SH_DIM]) {
 }
 
 float3 load_sh_as_rgb(float coeffs[SH_DIM], uint harmonics[SH_BUF_LEN]) {
-    float3 rgb = float3(0.5f, 0.5f, 0.5f) * 0;
+    float3 rgb = float3(0.5f, 0.5f, 0.5f);
 
     [unroll(SH_DIM)]
     for (uint i = 0; i < SH_DIM; i++) {
@@ -60,7 +60,7 @@ float3 load_sh_as_rgb(float coeffs[SH_DIM], uint harmonics[SH_BUF_LEN]) {
             unpacked = float3(
                 (harmonics[i] >> 0) & 0xFF, 
                 (harmonics[i] >> 8) & 0xFF, 
-                (harmonics[i] >> 16) & 0xFF) * (1.0 / 255.0);
+                (harmonics[i] >> 16) & 0xFF) * (1.0 / 255.0) - 0.5; // in theory we would have to divide by C0 here, but as coeffs[0] would just multiply by C0 again just do nothing..
         } else {
             // TODO: compress harmonics further
             uint a = harmonics[i * 2 - 1];
