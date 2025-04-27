@@ -16,6 +16,7 @@ public class RadFoamCompute : MonoBehaviour
 
     public ComputeShader radfoamShader;
     public ComputeShader closestShader;
+    public ComputeShader pbdShader;
 
 
     // model data
@@ -27,6 +28,12 @@ public class RadFoamCompute : MonoBehaviour
     private GraphicsBuffer closest_index_buffer;
     private GraphicsBuffer tmp_distance_buffer;
 
+    // PBD buffers
+    private GraphicsBuffer velocities_buffer;
+    private GraphicsBuffer inv_masses_buffer;
+    private GraphicsBuffer predicted_positions_buffer;
+    private GraphicsBuffer constraint_stiffness_buffer;
+
     // viewer state 
     private int debug_view = 0;
     private int camera_model = 0;
@@ -35,6 +42,7 @@ public class RadFoamCompute : MonoBehaviour
     private int current_sh_level = -1;
     private bool current_morton_reorder = true;
     private int test_algo = 0;
+    private bool enable_pbd = true;
 
 
     private const int SH_DEGREE_MAX = 3;
@@ -50,6 +58,11 @@ public class RadFoamCompute : MonoBehaviour
 
         closest_index_buffer?.Release();
         tmp_distance_buffer?.Release();
+        
+        velocities_buffer?.Release();
+        inv_masses_buffer?.Release();
+        predicted_positions_buffer?.Release();
+        constraint_stiffness_buffer?.Release();
     }
 
     void OnGUI()
@@ -59,6 +72,7 @@ public class RadFoamCompute : MonoBehaviour
         GUILayout.Label("Morton reorder (R): " + current_morton_reorder);
         GUILayout.Label("Debug view (D): " + debug_view);
         GUILayout.Label("Camera Model (C): " + camera_model);
+        GUILayout.Label("PBD Enabled (P): " + enable_pbd);
     }
 
     void Load(in Model model, int sh_degree, bool morton_reorder)
@@ -209,7 +223,22 @@ public class RadFoamCompute : MonoBehaviour
 
         // calculate direction vectors between adjacent cells
         {
-            adjacency_diff_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, adjacency_count, 4 * 4); // 4*2 should be enough, but somehow it isnt
+        adjacency_diff_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, adjacency_count, 4 * 4);
+
+        // Initialize PBD buffers
+        velocities_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertex_count, 12);
+        inv_masses_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertex_count, 4);
+        predicted_positions_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertex_count, 12);
+        constraint_stiffness_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, adjacency_count, 4);
+
+        // Initialize velocities to zero and masses to 1
+        using var init_velocities = new NativeArray<float3>(vertex_count, Allocator.Temp);
+        using var init_masses = new NativeArray<float>(vertex_count, Allocator.Temp);
+        for (int i = 0; i < vertex_count; i++) {
+            init_masses[i] = 1.0f;
+        }
+        velocities_buffer.SetData(init_velocities);
+        inv_masses_buffer.SetData(init_masses);
             var kernel = radfoamShader.FindKernel("BuildAdjDiff");
             radfoamShader.SetInt("_Count", vertex_count);
             radfoamShader.SetBuffer(kernel, "_start_index", closest_index_buffer);
@@ -229,6 +258,34 @@ public class RadFoamCompute : MonoBehaviour
 
     void Update()
     {
+        // PBD prediction step
+        if (enable_pbd && positions_buffer != null && velocities_buffer != null) {
+            var kernel = pbdShader.FindKernel("PredictPositions");
+            pbdShader.SetBuffer(kernel, "_positions", positions_buffer);
+            pbdShader.SetBuffer(kernel, "_velocities", velocities_buffer);
+            pbdShader.SetBuffer(kernel, "_predicted_positions", predicted_positions_buffer);
+            pbdShader.SetBuffer(kernel, "_inv_masses", inv_masses_buffer);
+            pbdShader.SetFloat("_deltaTime", Time.deltaTime);
+            pbdShader.Dispatch(kernel, Mathf.CeilToInt(positions_buffer.count / 64f), 1, 1);
+
+            // Solve constraints (3 iterations)
+            for (int i = 0; i < 3; i++) {
+                kernel = pbdShader.FindKernel("SolveDistanceConstraints");
+                pbdShader.SetBuffer(kernel, "_predicted_positions", predicted_positions_buffer);
+                pbdShader.SetBuffer(kernel, "_adjacency", adjacency_buffer);
+                pbdShader.SetBuffer(kernel, "_constraint_stiffness", constraint_stiffness_buffer);
+                pbdShader.Dispatch(kernel, Mathf.CeilToInt(adjacency_buffer.count / 64f), 1, 1);
+            }
+
+            // Update velocities and positions
+            kernel = pbdShader.FindKernel("UpdateVelocities");
+            pbdShader.SetBuffer(kernel, "_positions", positions_buffer);
+            pbdShader.SetBuffer(kernel, "_predicted_positions", predicted_positions_buffer);
+            pbdShader.SetBuffer(kernel, "_velocities", velocities_buffer);
+            pbdShader.SetFloat("_deltaTime", Time.deltaTime);
+            pbdShader.Dispatch(kernel, Mathf.CeilToInt(positions_buffer.count / 64f), 1, 1);
+        }
+
         if (Input.GetKeyDown(KeyCode.C)) {
             camera_model = camera_model == 0 ? 1 : 0;
         }
@@ -252,6 +309,7 @@ public class RadFoamCompute : MonoBehaviour
         }
 
         test_algo = Input.GetKey(KeyCode.A) ? 1 : 0;
+        enable_pbd = Input.GetKeyDown(KeyCode.P) ? !enable_pbd : enable_pbd;
 
         // if (Input.GetKeyDown(KeyCode.Return)) {
         //     OnDestroy();

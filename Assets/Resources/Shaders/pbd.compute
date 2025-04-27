@@ -1,0 +1,91 @@
+#pragma kernel PredictPositions
+#pragma kernel SolveDistanceConstraints  
+#pragma kernel UpdateVelocities
+
+#include "UnityCG.cginc"
+
+// Input buffers
+StructuredBuffer<float4> _positions;
+StructuredBuffer<float3> _velocities;
+StructuredBuffer<float> _inv_masses;
+
+// Output buffers
+RWStructuredBuffer<float3> _predicted_positions;
+RWStructuredBuffer<float3> _updated_velocities;
+
+// Constraints buffers
+StructuredBuffer<uint> _adjacency;
+StructuredBuffer<float> _constraint_stiffness;
+
+// Simulation parameters
+float _deltaTime;
+
+[numthreads(64, 1, 1)]
+void PredictPositions(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    float3 velocity = _velocities[idx];
+    float invMass = _inv_masses[idx];
+    
+    // Only move if mass is not infinite
+    if (invMass > 0)
+    {
+        float3 predictedPos = _positions[idx].xyz + velocity * _deltaTime;
+        _predicted_positions[idx] = predictedPos;
+    }
+    else
+    {
+        _predicted_positions[idx] = _positions[idx].xyz;
+    }
+}
+
+[numthreads(64, 1, 1)]
+void SolveDistanceConstraints(uint3 id : SV_DispatchThreadID)
+{
+    uint constraintIdx = id.x;
+    uint i = _adjacency[constraintIdx * 2];
+    uint j = _adjacency[constraintIdx * 2 + 1];
+    float stiffness = _constraint_stiffness[constraintIdx];
+
+    float3 pi = _predicted_positions[i];
+    float3 pj = _predicted_positions[j];
+    float invMassi = _inv_masses[i];
+    float invMassj = _inv_masses[j];
+
+    // Skip if either particle has infinite mass
+    if (invMassi <= 0 && invMassj <= 0)
+        return;
+
+    float3 delta = pj - pi;
+    float distance = length(delta);
+    float3 direction = distance > 0 ? delta / distance : float3(0, 1, 0);
+
+    // Calculate constraint violation
+    float restLength = length(_positions[j].xyz - _positions[i].xyz);
+    float constraint = distance - restLength;
+
+    // Apply correction
+    float totalInvMass = invMassi + invMassj;
+    float lambda = -constraint * stiffness / totalInvMass;
+
+    _predicted_positions[i] += invMassi * lambda * direction;
+    _predicted_positions[j] -= invMassj * lambda * direction;
+}
+
+[numthreads(64, 1, 1)]
+void UpdateVelocities(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    float invMass = _inv_masses[idx];
+    
+    if (invMass > 0)
+    {
+        float3 predictedPos = _predicted_positions[idx];
+        float3 oldPos = _positions[idx].xyz;
+        _updated_velocities[idx] = (predictedPos - oldPos) / _deltaTime;
+    }
+    else
+    {
+        _updated_velocities[idx] = _velocities[idx];
+    }
+}
