@@ -108,7 +108,7 @@ Shader "Hidden/Custom/RadFoamShader"
                 return tex2Dlod(_adjacency_diff_tex, float4(index_to_tex_buffer(i, _adjacency_tex_TexelSize.xy, 4096), 0, 0)).xyz;
             }
 
-            #define CHUNK_SIZE 6
+            #define CHUNK_SIZE 8
 
             fixed4 frag (blit_v2f input) : SV_Target
             {
@@ -130,7 +130,7 @@ Shader "Hidden/Custom/RadFoamShader"
                 float t_0 = 0.0f;
 
                 int i = 0;
-                for (; i < 200 && transmittance > 0.05; i++) {
+                for (; i < 200 && transmittance > 0.1; i++) {
                     float4 cell_data = positions_buff(cell);
                     uint adj_from = cell > 0 ? asuint(positions_buff(cell - 1).w) : 0;
                     uint adj_to = asuint(cell_data.w);

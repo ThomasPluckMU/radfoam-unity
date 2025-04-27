@@ -244,7 +244,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 81dacdeec5c9b30458012843f2f454fd, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  Data: {fileID: -4966213957662602761, guid: d45be6f226f6a6f41817ec36b8d6bb2e, type: 3}
+  Data: {fileID: -4966213957662602761, guid: 23fcdcc2bb33b1a48b945f1bf1edf862, type: 3}
   fisheye_fov: 60
   Target: {fileID: 617752957}
 --- !u!1 &617752956

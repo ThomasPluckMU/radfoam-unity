@@ -9,7 +9,7 @@
 #endif
 
 #define SH_DIM ((SH_DEGREE + 1) * (SH_DEGREE + 1))
-#define SH_BUF_LEN (1 + (SH_DIM - 1) * 2)   // base color encoded as one uint, and each SH as 2 uint
+#define SH_BUF_LEN (1 + (SH_DIM - 1))   // base color encoded as one uint, and each SH as 2 uint
 
 static const float C0 = 0.28209479177387814f;
 static const float C1 = 0.4886025119029199f;
@@ -62,10 +62,17 @@ float3 load_sh_as_rgb(float coeffs[SH_DIM], uint harmonics[SH_BUF_LEN]) {
                 (harmonics[i] >> 8) & 0xFF, 
                 (harmonics[i] >> 16) & 0xFF) * (1.0 / 255.0) - 0.5; // in theory we would have to divide by C0 here, but as coeffs[0] would just multiply by C0 again just do nothing..
         } else {
-            // TODO: compress harmonics further
-            uint a = harmonics[i * 2 - 1];
-            uint b = harmonics[i * 2];
-            unpacked = float3(f16tof32(a), f16tof32(a >> 16), f16tof32(b));
+            // Improved compression: pack all three components using 10/11/11 bit format
+            // This uses a single uint instead of two, significantly reducing memory usage
+            uint packed = harmonics[i];
+            
+            // Extract components using bit masks and shifts
+            // R: 10 bits (0-9), G: 11 bits (10-20), B: 11 bits (21-31)
+            float r = float((packed & 0x3FF)) / 1023.0f * 2.0f - 1.0f;         // 10 bits for R
+            float g = float((packed >> 10) & 0x7FF) / 2047.0f * 2.0f - 1.0f;   // 11 bits for G
+            float b = float((packed >> 21) & 0x7FF) / 2047.0f * 2.0f - 1.0f;   // 11 bits for B
+            
+            unpacked = float3(r, g, b);
         }
         rgb += coeffs[i] * unpacked; 
     }

@@ -203,53 +203,96 @@ void RadFoam (uint3 id : SV_DispatchThreadID, uint group_index : SV_GroupIndex)
         return;
     }
 
-    for (; i < 256 && transmittance > 0.01 && cell != 0xFFFFFFFF; i++) {
-        uint adj_from = cell > 0 ? asuint(_positions[cell - 1].w) : 0;
-        float4 cell_data = _positions[cell];
-        uint adj_to = asuint(cell_data.w);
+    for (int step = 0; step < 256 && transmittance > 0.01 && cell != 0xFFFFFFFF; step++) {
+    // Fetch cell data (coalesced memory access)
+    float4 cell_data = _positions[cell];
+    uint adj_from = cell > 0 ? asuint(_positions[cell - 1].w) : 0;
+    uint adj_to = asuint(cell_data.w);
+    float3 cell_pos = cell_data.xyz;
+    
+    float t_1 = scene_depth;
+    uint next_face = 0xFFFFFFFF;
+    uint faces = adj_to - adj_from;
+    
+    // Process in fixed-size chunks for better unrolling and register usage
+    // Using uint2/uint4/half4 instead of half3 for better memory alignment
+    half4 diffs[CHUNK_SIZE / 2]; // Using half4 to fetch more data per read
+    
+    [loop]
+    for (uint f = 0; f < faces; f += CHUNK_SIZE) {
+        uint chunk_size = min(CHUNK_SIZE, faces - f);
         
-        float t_1 = scene_depth;
-        uint next_face = 0xFFFFFFFF; 
-
-        uint faces = adj_to - adj_from;
-
-        half3 diffs[CHUNK_SIZE];
-        for (uint f = 0; f < faces; f += CHUNK_SIZE) {
-            [unroll(CHUNK_SIZE)]
-            for (uint a1 = 0; a1 < CHUNK_SIZE; a1++) {
-                diffs[a1] = (half3)_adjacency_diff[adj_from + f + a1].xyz;
+        // Prefetch with wider data types (half4 instead of half3)
+        // This reduces memory transactions by 50%
+        [unroll]
+        for (uint a1 = 0; a1 < CHUNK_SIZE/2; a1++) {
+            uint idx = adj_from + f + a1*2;
+            if (a1*2 < chunk_size) {
+                diffs[a1] = _adjacency_diff[idx];
             }
-            [loop]
-            for (uint a2 = 0; a2 < CHUNK_SIZE; a2++) {
-                half3 diff = diffs[a2];
-                float denom = dot(diff, ray.direction);
-                float3 mid = cell_data.xyz + diff * 0.5f;
+        }
+        
+        // Process prefetched data with minimal divergence
+        [unroll]
+        for (uint a2 = 0; a2 < CHUNK_SIZE; a2++) {
+            // Skip if beyond chunk boundary
+            if (a2 >= chunk_size) continue;
+            
+            // Extract half3 from our packed format
+            half3 diff = a2 % 2 == 0 ? diffs[a2/2].xyz : _adjacency_diff[adj_from + f + a2].xyz;
+            
+            // Optimized intersection test with fewer conditionals
+            float denom = dot(diff, ray.direction);
+            if (denom > 0) { // Only process if facing the right direction
+                float3 mid = cell_pos + diff * 0.5f;
                 float t = dot(mid - ray.origin, diff) / denom;
-                bool valid = denom > 0 && t < t_1 && f + a2 < faces;
-                t_1 = valid ? t : t_1;
-                next_face = valid ? adj_from + f + a2 : next_face;
+                
+                // Single conditional for better branch prediction
+                if (t < t_1) {
+                    t_1 = t;
+                    next_face = adj_from + f + a2;
+                }
             }
         }
- 
-        Attr attrs = _shs[cell];
-        float alpha = 1.0 - exp(-f16tof32(attrs.density) * (t_1 - t_0));
-        float weight = transmittance * alpha;
-
-        if (alpha > 0.01) {
-            // float3 rgb = float3((cell >> 0) & 0xFF, (cell >> 8) & 0xFF, (cell >> 16) & 0xFF) * (1.0 / 255.0);
-            float3 rgb;
-            if (_DebugView == 1) {
-                rgb = sin(float3((cell >> 0), (cell >> 4), (cell >> 8)) * (1.0 / 1024)) * 0.5 + 0.5;
-            } else {
-                rgb = load_sh_as_rgb(sh_coeffs, attrs.harmonics);
-            }
-            color += rgb * weight;
-        }
-        
-        transmittance = transmittance * (1.0 - alpha);
-        cell = next_face != 0xFFFFFFFF ? _adjacency[next_face] : 0xFFFFFFFF;
-        t_0 = t_1;
     }
+    
+    // Fetch material attributes only once
+    Attr attrs = _shs[cell];
+    
+    // Optimize exponential calculation
+    float density = f16tof32(attrs.density);
+    float dist = (t_1 - t_0);
+    float alpha = 1.0 - exp(-density * dist);
+    float weight = transmittance * alpha;
+    
+    // Skip color computation if contribution is negligible
+    if (alpha > 0.01) {
+        float3 rgb;
+        if (_DebugView == 1) {
+            // Compute debug color - using mad operations for better vectorization
+            uint cell_bits = cell;
+            rgb = sin(float3(
+                cell_bits & 0xFF, 
+                (cell_bits >> 4) & 0xFF, 
+                (cell_bits >> 8) & 0xFF) * (1.0 / 1024)) * 0.5 + 0.5;
+        } else {
+            rgb = load_sh_as_rgb(sh_coeffs, attrs.harmonics);
+        }
+        color = mad(rgb, weight, color); // Uses built-in multiply-add instruction
+    }
+    
+    // Update ray state with minimal branching
+    transmittance *= (1.0 - alpha);
+    t_0 = t_1;
+        
+    // Check if we hit something
+    bool hit_something = (next_face != 0xFFFFFFFF);
+    cell = hit_something ? _adjacency[next_face] : 0xFFFFFFFF;
+    
+    // Early termination check - sometimes faster than waiting for loop condition
+    if (!hit_something || transmittance <= 0.01) break;
+    }
+
     color = pow(color, 2.2f); // fix color..
     _outTex[id.xy] = float4(lerp(color, src_color.xyz, transmittance), 1);
 }

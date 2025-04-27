@@ -10,44 +10,63 @@ RWStructuredBuffer<float> _Distance;
 #define THREADS_PER_GROUP 1024
 #define FLT_MAX 3.4028235e+38
 
-groupshared uint sharedIndices[THREADS_PER_GROUP];
-groupshared float sharedDistances[THREADS_PER_GROUP];
-
-void reduce_group(uint local_index, uint group_index) 
-{
-    for (uint stride = THREADS_PER_GROUP / 2; stride > 0; stride /= 2) {
-        if (local_index < stride) {
-            if (sharedDistances[local_index + stride] < sharedDistances[local_index]) {
-                sharedDistances[local_index] = sharedDistances[local_index + stride];
-                sharedIndices[local_index] = sharedIndices[local_index + stride];
-            }
-        }
-        GroupMemoryBarrierWithGroupSync();
-    }
-
-    if (local_index == 0) {
-        _Result[group_index] = sharedIndices[0];
-        _Distance[group_index] = sharedDistances[0];
-    }
-}
+groupshared uint sharedIndices[THREADS_PER_GROUP/2];
+groupshared float sharedDistances[THREADS_PER_GROUP/2];
 
 [numthreads(THREADS_PER_GROUP, 1, 1)]
 void FindClosestPosition(uint3 id : SV_DispatchThreadID,
                          uint3 groupId : SV_GroupID, 
                          uint3 localId : SV_GroupThreadID)
 {
-    if (id.x >= _Count) {
-        sharedDistances[localId.x] = FLT_MAX;
-    } else {
-        float3 diff = _positions[id.x].xyz - _TargetPosition;
-        sharedDistances[localId.x] = dot(diff, diff);
+    uint tid = localId.x;
+    uint globalIdx = id.x;
+    uint globalOffset = groupId.x * THREADS_PER_GROUP;
+    
+    // Process two elements per thread in the first step
+    float dist1 = FLT_MAX;
+    float dist2 = FLT_MAX;
+    uint idx1 = globalIdx;
+    uint idx2 = globalIdx + THREADS_PER_GROUP/2;
+    
+    if (globalIdx < _Count) {
+        float3 diff = _positions[globalIdx].xyz - _TargetPosition;
+        dist1 = dot(diff, diff);  // Squared distance
     }
     
-    sharedIndices[localId.x] = id.x;
-
+    if (idx2 < _Count) {
+        float3 diff = _positions[idx2].xyz - _TargetPosition;
+        dist2 = dot(diff, diff);  // Squared distance
+    }
+    
+    // First reduction: compare the two elements this thread loaded
+    if (tid < THREADS_PER_GROUP/2) {
+        if (dist1 <= dist2) {
+            sharedDistances[tid] = dist1;
+            sharedIndices[tid] = idx1;
+        } else {
+            sharedDistances[tid] = dist2;
+            sharedIndices[tid] = idx2;
+        }
+    }
+    
     GroupMemoryBarrierWithGroupSync();
-
-    reduce_group(localId.x, groupId.x);
+    
+    // Perform reduction in shared memory
+    for (uint s = THREADS_PER_GROUP/4; s > 0; s >>= 1) {
+        if (tid < s) {
+            if (sharedDistances[tid + s] < sharedDistances[tid]) {
+                sharedDistances[tid] = sharedDistances[tid + s];
+                sharedIndices[tid] = sharedIndices[tid + s];
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    
+    // Write result for this block to global memory
+    if (tid == 0) {
+        _Result[groupId.x] = sharedIndices[0];
+        _Distance[groupId.x] = sharedDistances[0];
+    }
 }
 
 [numthreads(THREADS_PER_GROUP, 1, 1)]
@@ -55,16 +74,52 @@ void FindClosestPositionStep(uint3 id : SV_DispatchThreadID,
                              uint3 groupId : SV_GroupID, 
                              uint3 localId : SV_GroupThreadID)
 {
-    uint index = id.x;
-    if (index >= _Count) {
-        sharedDistances[localId.x] = FLT_MAX;
-        sharedIndices[localId.x] = 0;
-    } else {
-        sharedDistances[localId.x] = _Distance[index];
-        sharedIndices[localId.x] = _Result[index];
+    uint tid = localId.x;
+    uint globalIdx = id.x;
+    
+    // Process two elements per thread in the first step
+    float dist1 = FLT_MAX;
+    float dist2 = FLT_MAX;
+    uint idx1 = 0;
+    uint idx2 = 0;
+    
+    if (globalIdx < _Count) {
+        dist1 = _Distance[globalIdx];
+        idx1 = _Result[globalIdx];
     }
-
+    
+    if (globalIdx + THREADS_PER_GROUP/2 < _Count) {
+        dist2 = _Distance[globalIdx + THREADS_PER_GROUP/2];
+        idx2 = _Result[globalIdx + THREADS_PER_GROUP/2];
+    }
+    
+    // First reduction
+    if (tid < THREADS_PER_GROUP/2) {
+        if (dist1 <= dist2) {
+            sharedDistances[tid] = dist1;
+            sharedIndices[tid] = idx1;
+        } else {
+            sharedDistances[tid] = dist2;
+            sharedIndices[tid] = idx2;
+        }
+    }
+    
     GroupMemoryBarrierWithGroupSync();
-
-    reduce_group(localId.x, groupId.x);
+    
+    // Perform reduction in shared memory
+    for (uint s = THREADS_PER_GROUP/4; s > 0; s >>= 1) {
+        if (tid < s) {
+            if (sharedDistances[tid + s] < sharedDistances[tid]) {
+                sharedDistances[tid] = sharedDistances[tid + s];
+                sharedIndices[tid] = sharedIndices[tid + s];
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    
+    // Write result for this block to global memory
+    if (tid == 0) {
+        _Result[groupId.x] = sharedIndices[0];
+        _Distance[groupId.x] = sharedDistances[0];
+    }
 }
