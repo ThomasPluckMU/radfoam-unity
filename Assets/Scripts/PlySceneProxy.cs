@@ -1,49 +1,34 @@
 using UnityEngine;
 using System.Collections.Generic;
 
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
+
 namespace Ply
 {
-    // This component acts as a proxy for PLY data in the scene
-    // It references the immutable PLY data asset but allows for scene-level editing
     [ExecuteInEditMode]
     public class PlySceneProxy : MonoBehaviour
     {
-        // Reference to the immutable PLY data asset
+        // Core settings
         [SerializeField] private PlyData sourceData;
-        
-        // Transformation controls
-        [SerializeField] private Vector3 localOffset = Vector3.zero;
-        [SerializeField] private Vector3 localScale = Vector3.one;
-        [SerializeField] private Vector3 rotationAngles = Vector3.zero;
-        
-        // Filtering options
-        [SerializeField, Range(0, 1)] private float densityThreshold = 0.0f;
-        [SerializeField, Range(0, 1)] private float visualScale = 1.0f;
+        [SerializeField] private float visualScale = 0.01f;
+        [SerializeField] public bool persistInScene = false;
         [SerializeField] private int maxPointsToRender = 10000;
         
-        // Region selection (for partial visualization)
-        [SerializeField] private Bounds regionBounds = new Bounds(Vector3.zero, Vector3.one);
-        [SerializeField] private bool useRegionBounds = false;
+        // Selection data
+        [SerializeField] private List<int> selectedPointIndices = new List<int>();
+        private HashSet<int> selectedPointsSet = new HashSet<int>();
         
-        // Display options
-        [SerializeField] private Color defaultColor = Color.white;
-        [SerializeField] private VisualizationMode visualizationMode = VisualizationMode.SourceColor;
+        // Hidden points data (non-destructive filtering)
+        [SerializeField] private List<int> hiddenPointIndices = new List<int>();
+        private HashSet<int> hiddenPointsSet = new HashSet<int>();
         
-        // Runtime/cached data - not serialized
+        // Runtime data
         private Vector3[] points;
         private Color[] colors;
         private Bounds dataBounds;
         private bool isDirty = true;
-        
-        // Visualization modes
-        public enum VisualizationMode
-        {
-            SourceColor,
-            Density,
-            Height,
-            Distance,
-            Custom
-        }
         
         // Public properties
         public PlyData SourceData
@@ -56,76 +41,6 @@ namespace Ply
                     sourceData = value;
                     isDirty = true;
                 }
-            }
-        }
-        
-        public Vector3 LocalOffset
-        {
-            get => localOffset;
-            set
-            {
-                localOffset = value;
-                isDirty = true;
-            }
-        }
-        
-        public Vector3 LocalScale
-        {
-            get => localScale;
-            set
-            {
-                localScale = value;
-                isDirty = true;
-            }
-        }
-        
-        public Vector3 RotationAngles
-        {
-            get => rotationAngles;
-            set
-            {
-                rotationAngles = value;
-                isDirty = true;
-            }
-        }
-        
-        public float DensityThreshold
-        {
-            get => densityThreshold;
-            set
-            {
-                densityThreshold = Mathf.Clamp01(value);
-                isDirty = true;
-            }
-        }
-        
-        public Bounds RegionBounds
-        {
-            get => regionBounds;
-            set
-            {
-                regionBounds = value;
-                isDirty = true;
-            }
-        }
-        
-        public bool UseRegionBounds
-        {
-            get => useRegionBounds;
-            set
-            {
-                useRegionBounds = value;
-                isDirty = true;
-            }
-        }
-        
-        public VisualizationMode CurrentVisualizationMode
-        {
-            get => visualizationMode;
-            set
-            {
-                visualizationMode = value;
-                isDirty = true;
             }
         }
         
@@ -148,8 +63,14 @@ namespace Ply
                 isDirty = true;
             }
         }
+
+        public bool PersistInScene
+        {
+            get => persistInScene;
+            set => persistInScene = value;
+        }
         
-        // Public access to visualization data
+        // Data access properties
         public Vector3[] Points
         {
             get
@@ -177,17 +98,154 @@ namespace Ply
             }
         }
         
+        public HashSet<int> SelectedPoints => selectedPointsSet;
+        public HashSet<int> HiddenPoints => hiddenPointsSet;
+
+        public bool IsPointHidden(int index)
+        {
+            return hiddenPointsSet.Contains(index);
+        }
+
+        public void HideSelectedPoints()
+        {
+            foreach (int index in selectedPointsSet)
+            {
+                if (!hiddenPointsSet.Contains(index))
+                {
+                    hiddenPointsSet.Add(index);
+                    hiddenPointIndices.Add(index);
+                }
+            }
+            ClearSelection();
+            isDirty = true;
+        }
+
+        public void ShowAllPoints()
+        {
+            hiddenPointsSet.Clear();
+            hiddenPointIndices.Clear();
+            isDirty = true;
+        }
+
+        public Vector3[] GetVisiblePoints()
+        {
+            if (isDirty) RefreshData();
+            if (points == null || hiddenPointsSet.Count == 0)
+                return points;
+                
+            Vector3[] visiblePoints = new Vector3[points.Length - hiddenPointsSet.Count];
+            int destIndex = 0;
+            for (int i = 0; i < points.Length; i++)
+            {
+                if (!hiddenPointsSet.Contains(i))
+                {
+                    visiblePoints[destIndex++] = points[i];
+                }
+            }
+            return visiblePoints;
+        }
+
+        public bool ExportVisiblePoints(string savePath)
+        {
+            if (Points == null || Colors == null)
+                return false;
+                
+            // Calculate how many visible points we have
+            int visibleCount = 0;
+            for (int i = 0; i < Points.Length; i++)
+            {
+                if (!IsPointHidden(i))
+                    visibleCount++;
+            }
+            
+            // Early exit if no visible points
+            if (visibleCount == 0)
+                return false;
+            
+            // Collect only visible points and their colors
+            Vector3[] visiblePoints = new Vector3[visibleCount];
+            Color[] visibleColors = new Color[visibleCount];
+            
+            int index = 0;
+            for (int i = 0; i < Points.Length; i++)
+            {
+                if (!IsPointHidden(i))
+                {
+                    visiblePoints[index] = Points[i];
+                    visibleColors[index] = Colors[i];
+                    index++;
+                }
+            }
+            
+            // Export to PLY format
+            return PlyExporter.ExportPointCloud(savePath, visiblePoints, visibleColors);
+        }
+
+        public void SelectPoint(int index)
+        {
+            if (index >= 0 && index < points.Length && !selectedPointsSet.Contains(index))
+            {
+                selectedPointsSet.Add(index);
+                selectedPointIndices.Add(index);
+            }
+        }
+
+        public void TogglePointSelection(int index)
+        {
+            if (selectedPointsSet.Contains(index))
+                DeselectPoint(index);
+            else
+                SelectPoint(index);
+        }
+
+        public void DeselectPoint(int index)
+        {
+            selectedPointsSet.Remove(index);
+            selectedPointIndices.Remove(index);
+        }
+
+        public void ClearSelection()
+        {
+            selectedPointsSet.Clear();
+            selectedPointIndices.Clear();
+        }
+
         private void OnEnable()
         {
             isDirty = true;
+            #if UNITY_EDITOR
+            if (UnityEditor.EditorApplication.isPlayingOrWillChangePlaymode) return;
+            UnityEditor.EditorApplication.delayCall += () => {
+                var rendererType = System.Type.GetType("Ply.PlySceneViewRenderer, Assembly-CSharp-Editor");
+                if (rendererType != null) {
+                    var registerMethod = rendererType.GetMethod("RegisterProxy", 
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                    registerMethod?.Invoke(null, new object[] { this });
+                }
+            };
+            #endif
         }
-        
+
+        private void OnDisable()
+        {
+            #if UNITY_EDITOR
+            if (UnityEditor.EditorApplication.isPlayingOrWillChangePlaymode) return;
+            UnityEditor.EditorApplication.delayCall += () => {
+                var rendererType = System.Type.GetType("Ply.PlySceneViewRenderer, Assembly-CSharp-Editor");
+                if (rendererType != null) {
+                    var registerMethod = rendererType.GetMethod("RegisterProxy", 
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                    registerMethod?.Invoke(null, new object[] { this });
+                }
+            };
+            #endif
+        }
+
         private void OnValidate()
         {
             isDirty = true;
         }
-        
-        // Refreshes the visualization data based on the source PLY data and current settings
+
         public void RefreshData()
         {
             if (sourceData == null)
@@ -199,45 +257,48 @@ namespace Ply
             
             try
             {
-                // Load the PLY model using a using statement for proper disposal
+                Debug.Log("Starting data refresh...");
                 using (Model model = sourceData.Load())
                 {
                     LoadVisualizationData(model);
                 }
                 
                 isDirty = false;
+                Debug.Log($"Data refresh complete. Loaded {(points != null ? points.Length : 0)} points.");
             }
             catch (System.Exception e)
             {
-                Debug.LogError($"Error refreshing PLY data: {e.Message}");
+                Debug.LogError($"Error refreshing PLY data: {e.Message}\n{e.StackTrace}");
                 points = null;
                 colors = null;
             }
         }
-        
-        // Forces a refresh of the visualization data
+
         public void ForceRefresh()
         {
             isDirty = true;
             RefreshData();
         }
         
-        // Loads visualization data from the model
+        // Load visualization data from model
         private void LoadVisualizationData(Model model)
         {
             try
             {
-                // Get vertex data
+                // Get vertex element
                 ElementView vertexView = model.element_view("vertex");
-                
-                // Create downsampled arrays
                 int totalVertices = vertexView.count;
-                int pointCount = Mathf.Min(totalVertices, maxPointsToRender);
+                Debug.Log($"Found {totalVertices} vertices in PLY data");
                 
+                // Points to render (with limit)
+                int pointCount = Mathf.Min(totalVertices, maxPointsToRender);
+                int step = Mathf.Max(1, totalVertices / pointCount);
+                
+                // Collections for data
                 List<Vector3> pointsList = new List<Vector3>(pointCount);
                 List<Color> colorsList = new List<Color>(pointCount);
                 
-                // Get property views for position
+                // Position properties
                 PropertyView xView = vertexView.property_view("x");
                 PropertyView yView = vertexView.property_view("y");
                 PropertyView zView = vertexView.property_view("z");
@@ -253,41 +314,19 @@ namespace Ply
                     redView = vertexView.property_view("red");
                     greenView = vertexView.property_view("green");
                     blueView = vertexView.property_view("blue");
+                    Debug.Log("Successfully found RGB color properties");
                 }
-                catch (System.ArgumentException)
+                catch (System.ArgumentException e)
                 {
                     hasColorData = false;
                     redView = vertexView.dummy_property_view();
                     greenView = vertexView.dummy_property_view();
                     blueView = vertexView.dummy_property_view();
+                    Debug.LogWarning($"No color properties found: {e.Message}");
                 }
                 
-                // Try to get density property
-                bool hasDensityData = true;
-                PropertyView densityView;
-                
-                try
-                {
-                    densityView = vertexView.property_view("density");
-                }
-                catch (System.ArgumentException)
-                {
-                    hasDensityData = false;
-                    densityView = vertexView.dummy_property_view();
-                }
-                
-                // Step size for downsampling
-                int step = Mathf.Max(1, totalVertices / pointCount);
-                
-                // Calculate the transformation matrix
-                Matrix4x4 transformMatrix = Matrix4x4.TRS(
-                    localOffset,
-                    Quaternion.Euler(rotationAngles),
-                    localScale
-                );
-                
-                // Process vertex data
-                for (int i = 0, srcIdx = 0; i < pointCount && srcIdx < totalVertices; i++, srcIdx += step)
+                // Process vertices
+                for (int srcIdx = 0; srcIdx < totalVertices; srcIdx += step)
                 {
                     // Get position
                     Vector3 position = new Vector3(
@@ -296,96 +335,41 @@ namespace Ply
                         zView.Get<float>(srcIdx)
                     );
                     
-                    // Apply the y-axis flip that the original code uses
-                    position.y = -position.y;
-                    
-                    // Get density if available
-                    float density = hasDensityData ? densityView.Get<float>(srcIdx) : 0f;
-                    
-                    // Apply density threshold filtering
-                    if (hasDensityData && densityThreshold > 0 && density < densityThreshold)
+                    // Get color
+                    Color color;
+                    if (hasColorData)
                     {
-                        continue; // Skip this point
+                        try {
+                            // Get raw color bytes (0-255)
+                            byte r = redView.Get<byte>(srcIdx);
+                            byte g = greenView.Get<byte>(srcIdx);
+                            byte b = blueView.Get<byte>(srcIdx);
+                            
+                            // Create color (directly using Color32 which handles byte->float conversion)
+                            color = new Color32(r, g, b, 255);
+                        }
+                        catch (System.Exception) {
+                            color = Color.white; // Fallback
+                        }
+                    }
+                    else
+                    {
+                        color = Color.white;
                     }
                     
-                    // Apply region bounds filtering
-                    if (useRegionBounds && !regionBounds.Contains(position))
-                    {
-                        continue; // Skip this point
-                    }
-                    
-                    // Apply transformation
-                    Vector3 transformedPosition = transformMatrix.MultiplyPoint3x4(position);
-                    
-                    // Determine color based on visualization mode
-                    Color color = defaultColor;
-                    
-                    switch (visualizationMode)
-                    {
-                        case VisualizationMode.SourceColor:
-                            if (hasColorData)
-                            {
-                                color = new Color(
-                                    redView.Get<byte>(srcIdx) / 255f,
-                                    greenView.Get<byte>(srcIdx) / 255f,
-                                    blueView.Get<byte>(srcIdx) / 255f
-                                );
-                            }
-                            else
-                            {
-                                // Create a position-based gradient if no color data
-                                color = new Color(
-                                    Mathf.Abs(position.x) / 10f % 1f,
-                                    Mathf.Abs(position.y) / 10f % 1f,
-                                    Mathf.Abs(position.z) / 10f % 1f
-                                );
-                            }
-                            break;
-                            
-                        case VisualizationMode.Density:
-                            if (hasDensityData)
-                            {
-                                float normalizedDensity = Mathf.Clamp01(density / 10f);
-                                color = new Color(normalizedDensity, normalizedDensity, normalizedDensity);
-                            }
-                            else
-                            {
-                                // Use distance from center as alternative
-                                float distance = Vector3.Distance(position, Vector3.zero);
-                                float normalizedDistance = Mathf.Clamp01(distance / 10f);
-                                color = new Color(normalizedDistance, normalizedDistance, normalizedDistance);
-                            }
-                            break;
-                            
-                        case VisualizationMode.Height:
-                            // Color based on Y position (height)
-                            float height = position.y;
-                            float normalizedHeight = Mathf.Clamp01((height + 5f) / 10f); // Adjust range as needed
-                            color = Color.HSVToRGB(normalizedHeight, 0.7f, 0.9f);
-                            break;
-                            
-                        case VisualizationMode.Distance:
-                            // Color based on distance from center
-                            float dist = Vector3.Distance(position, Vector3.zero);
-                            float normalizedDist = Mathf.Clamp01(dist / 10f);
-                            color = Color.Lerp(Color.blue, Color.red, normalizedDist);
-                            break;
-                            
-                        case VisualizationMode.Custom:
-                            // Use the default color (set via inspector)
-                            break;
-                    }
-                    
-                    // Add to lists
-                    pointsList.Add(transformedPosition);
+                    // Add point and color to lists
+                    pointsList.Add(position);
                     colorsList.Add(color);
+                    
+                    // Only collect a reasonable number of points for testing
+                    if (pointsList.Count >= pointCount) break;
                 }
                 
-                // Convert lists to arrays
+                // Convert to arrays
                 points = pointsList.ToArray();
                 colors = colorsList.ToArray();
                 
-                // Calculate bounds of the transformed data
+                // Calculate bounds
                 if (points.Length > 0)
                 {
                     dataBounds = new Bounds(points[0], Vector3.zero);
@@ -401,7 +385,7 @@ namespace Ply
             }
             catch (System.Exception e)
             {
-                Debug.LogError($"Error in LoadVisualizationData: {e.Message}");
+                Debug.LogError($"Error in LoadVisualizationData: {e.Message}\n{e.StackTrace}");
                 throw;
             }
         }

@@ -232,13 +232,15 @@ public class RadFoamCompute : MonoBehaviour
         constraint_stiffness_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, adjacency_count, 4);
 
         // Initialize velocities to zero and masses to 1
-        using var init_velocities = new NativeArray<float3>(vertex_count, Allocator.Temp);
-        using var init_masses = new NativeArray<float>(vertex_count, Allocator.Temp);
+        var init_velocities = new NativeArray<float3>(vertex_count, Allocator.Temp);
+        var init_masses = new NativeArray<float>(vertex_count, Allocator.Temp);
         for (int i = 0; i < vertex_count; i++) {
             init_masses[i] = 1.0f;
         }
         velocities_buffer.SetData(init_velocities);
         inv_masses_buffer.SetData(init_masses);
+        init_velocities.Dispose();
+        init_masses.Dispose();
             var kernel = radfoamShader.FindKernel("BuildAdjDiff");
             radfoamShader.SetInt("_Count", vertex_count);
             radfoamShader.SetBuffer(kernel, "_start_index", closest_index_buffer);

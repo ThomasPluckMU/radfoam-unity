@@ -53,7 +53,6 @@ public static class PlyMenuItems
     {
         GameObject go = new GameObject("PLY Scene Proxy");
         PlySceneProxy proxy = go.AddComponent<PlySceneProxy>();
-        PlyRenderer renderer = go.AddComponent<PlyRenderer>();
         
         // Set the object as selected
         Selection.activeGameObject = go;
@@ -160,7 +159,6 @@ public static class PlyMenuItems
                 // Create a new GameObject with the PLY scene proxy
                 GameObject go = new GameObject(Path.GetFileNameWithoutExtension(plyPath) + " Proxy");
                 PlySceneProxy proxy = go.AddComponent<PlySceneProxy>();
-                PlyRenderer renderer = go.AddComponent<PlyRenderer>();
                 
                 // Assign to proxy
                 proxy.SourceData = plyData;
