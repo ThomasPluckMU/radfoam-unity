@@ -1,6 +1,7 @@
 using UnityEngine;
 using UnityEditor;
 using System.Collections.Generic;
+using System.IO;
 
 namespace Ply
 {
@@ -11,12 +12,16 @@ namespace Ply
         private SerializedProperty visualScaleProp;
         private SerializedProperty persistInSceneProp;
         private SerializedProperty maxPointsProp;
+        private SerializedProperty useBoundingBoxFilterProp;
+        private SerializedProperty boundingBoxCenterProp;
+        private SerializedProperty boundingBoxSizeProp;
         
         private PlySceneProxy proxy;
-        private const int MAX_POINTS = 1000000000; // Higher limit since we're using simple GL
+        private const int MAX_POINTS = 50000; // Higher limit since we're using simple GL
         
         // Static flag to control global visibility of all PLY objects
         private static bool showAllPlyObjects = false;
+
 
         private void OnEnable()
         {
@@ -24,6 +29,9 @@ namespace Ply
             visualScaleProp = serializedObject.FindProperty("visualScale");
             persistInSceneProp = serializedObject.FindProperty("persistInScene");
             maxPointsProp = serializedObject.FindProperty("maxPointsToRender");
+            useBoundingBoxFilterProp = serializedObject.FindProperty("useBoundingBoxFilter");
+            boundingBoxCenterProp = serializedObject.FindProperty("boundingBoxCenter");
+            boundingBoxSizeProp = serializedObject.FindProperty("boundingBoxSize");
             
             proxy = (PlySceneProxy)target;
         }
@@ -57,16 +65,58 @@ namespace Ply
                 SceneView.RepaintAll();
             }
             
+            // Bounding Box Filter UI
+            EditorGUILayout.Space();
+            EditorGUILayout.LabelField("Bounding Box Filter", EditorStyles.boldLabel);
+            
+            EditorGUI.BeginChangeCheck();
+            EditorGUILayout.PropertyField(useBoundingBoxFilterProp, new GUIContent("Use Bounding Box Filter", "Only show/export points inside this box"));
+            
+            if (useBoundingBoxFilterProp.boolValue)
+            {
+                EditorGUILayout.HelpBox("Use the transform tools to position, rotate, and scale the bounding box in the scene view.", MessageType.Info);
+                
+                // Button to set box based on selection
+                if (GUILayout.Button("Set to Selection Bounds"))
+                {
+                    SetBoundingBoxToSelection();
+                }
+                
+                // Button to reset to data bounds
+                if (GUILayout.Button("Reset to Data Bounds"))
+                {
+                    ResetBoundingBoxToDataBounds();
+                }
+                
+                // Button to focus on box handle
+                if (proxy.BoundingBoxHandle != null && GUILayout.Button("Focus on Bounding Box"))
+                {
+                    Selection.activeGameObject = proxy.BoundingBoxHandle;
+                    SceneView.lastActiveSceneView.FrameSelected();
+                }
+            }
+            
+            if (EditorGUI.EndChangeCheck())
+            {
+                serializedObject.ApplyModifiedProperties();
+                proxy.UpdateBoundingBox();
+                SceneView.RepaintAll();
+            }
+            
             serializedObject.ApplyModifiedProperties();
             
+            // Export section with advanced options
+            EditorGUILayout.Space();
+            EditorGUILayout.LabelField("Export", EditorStyles.boldLabel);
+                        
+            if (GUILayout.Button("Export Filtered PLY"))
+            {
+                ExportFilteredPly();
+            }
+                        
             // Add debug buttons
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Debugging", EditorStyles.boldLabel);
-            
-            if (GUILayout.Button("Log Color Data"))
-            {
-                LogColorData();
-            }
             
             if (GUILayout.Button("Force Refresh"))
             {
@@ -88,9 +138,9 @@ namespace Ply
                     proxy.ClearSelection();
                 }
                 
-                if (GUILayout.Button("Delete Selected Points"))
+                if (GUILayout.Button("Hide Selected Points"))
                 {
-                    DeleteSelectedPoints();
+                    HideSelectedPoints();
                 }
             }
             
@@ -102,77 +152,112 @@ namespace Ply
             
             using (new EditorGUI.DisabledScope(proxy.HiddenPoints.Count == 0))
             {
-                if (GUILayout.Button("Show All Points"))
+                if (GUILayout.Button("Show All Hidden Points"))
                 {
-                    Undo.RecordObject(proxy, "Show All Points");
-                    proxy.ShowAllPoints();
-                    EditorUtility.SetDirty(proxy);
-                }
-
-                if (GUILayout.Button("Export Visible Points as PLY"))
-                {
-                    ExportVisiblePoints();
+                    ShowAllPoints();
                 }
             }
         }
 
-        private void LogColorData()
+        private void SetBoundingBoxToSelection()
         {
-            if (proxy == null || proxy.Points == null || proxy.Points.Length == 0)
+            if (proxy.SelectedPoints.Count == 0) return;
+            
+            Vector3[] points = proxy.Points;
+            Bounds selectionBounds = new Bounds();
+            bool isFirst = true;
+            
+            foreach (int index in proxy.SelectedPoints)
             {
-                Debug.Log("No point data available");
+                if (index < 0 || index >= points.Length) continue;
+                
+                if (isFirst)
+                {
+                    selectionBounds = new Bounds(points[index], Vector3.zero);
+                    isFirst = false;
+                }
+                else
+                {
+                    selectionBounds.Encapsulate(points[index]);
+                }
+            }
+            
+            if (!isFirst) // If we added at least one point
+            {
+                Undo.RecordObject(proxy, "Set Bounding Box To Selection");
+                proxy.BoundingBoxCenter = selectionBounds.center;
+                proxy.BoundingBoxSize = selectionBounds.size * 1.05f; // Add a small margin
+                EditorUtility.SetDirty(proxy);
+            }
+        }
+        
+        private void ResetBoundingBoxToDataBounds()
+        {
+            Bounds dataBounds = proxy.DataBounds;
+            
+            Undo.RecordObject(proxy, "Reset Bounding Box");
+            proxy.BoundingBoxCenter = dataBounds.center;
+            proxy.BoundingBoxSize = dataBounds.size;
+            EditorUtility.SetDirty(proxy);
+        }
+        
+        private void ExportFilteredPly()
+        {
+            if (proxy.SourceData == null)
+            {
+                EditorUtility.DisplayDialog("Export Error", "No PLY data source assigned", "OK");
                 return;
             }
             
-            Color[] colors = proxy.Colors;
-            int count = Mathf.Min(10, colors.Length); // Log first 10 colors
+            string defaultName = proxy.gameObject.name + "_filtered.ply";
+            string path = EditorUtility.SaveFilePanel("Export Filtered PLY", "", defaultName, "ply");
             
-            Debug.Log($"Point count: {proxy.Points.Length}, Color count: {colors.Length}");
+            if (string.IsNullOrEmpty(path)) return;
             
-            for (int i = 0; i < count; i++)
+            bool success;
+            
+            success = PlyExporter.ExportWithIndices(
+                path, 
+                proxy.SourceData, 
+                proxy.HiddenPoints,
+                proxy.UseBoundingBoxFilter,  // Use the bounding box flag
+                proxy.BoundingBoxCenter,     // Pass bounding box parameters
+                proxy.BoundingBoxSize,
+                proxy.BoundingBoxRotation,
+                (progress, message) => {
+                    EditorUtility.DisplayProgressBar("Exporting PLY", message, progress);
+                }
+            );
+            
+            EditorUtility.ClearProgressBar();
+            
+            if (success)
             {
-                Color c = colors[i];
-                Debug.Log($"Color[{i}]: R={c.r:F3}, G={c.g:F3}, B={c.b:F3}, A={c.a:F3}");
+                EditorUtility.DisplayDialog("Export Complete", "Filtered PLY file exported successfully", "OK");
+            }
+            else
+            {
+                EditorUtility.DisplayDialog("Export Error", "Failed to export PLY file", "OK");
             }
         }
 
-        private void DeleteSelectedPoints()
+        private void HideSelectedPoints()
         {
             if (proxy.SelectedPoints.Count == 0)
                 return;
                 
-            bool confirm = EditorUtility.DisplayDialog(
-                "Delete Points",
-                $"Are you sure you want to delete {proxy.SelectedPoints.Count} points?",
-                "Delete", "Cancel"
-            );
-            
-            if (!confirm)
-                return;
-                
-            Undo.RecordObject(proxy, "Delete Points");
-            
-            // Non-destructive approach - hide the points
+            Undo.RecordObject(proxy, "Hide Selected Points");
             proxy.HideSelectedPoints();
-            
-            Debug.Log($"Hid {proxy.HiddenPoints.Count} points (non-destructive)");
+            Debug.Log($"Hid {proxy.HiddenPoints.Count} points");
             EditorUtility.SetDirty(proxy);
         }
-
-        private void ExportVisiblePoints()
+        
+        private void ShowAllPoints()
         {
-            if (proxy == null || proxy.Points == null)
-                return;
-                
-            string defaultName = proxy.name + "_filtered.ply";
-            string savePath = EditorUtility.SaveFilePanel("Save Filtered PLY", "", defaultName, "ply");
-            if (string.IsNullOrEmpty(savePath))
-                return;
-                
-            if (proxy.ExportVisiblePoints(savePath))
-            {
-                Debug.Log($"Successfully exported filtered PLY to: {savePath}");
-            }
+            Undo.RecordObject(proxy, "Show All Points");
+            proxy.ShowAllPoints();
+            Debug.Log("Showing all previously hidden points");
+            EditorUtility.SetDirty(proxy);
         }
     }
 }

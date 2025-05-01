@@ -11,7 +11,6 @@ public class RadFoamWebGL : MonoBehaviour
     public float fisheye_fov = 60;
     public Transform Target;
 
-
     private Material blitMat;
     private Texture2D positions_tex;
     private Texture2D attr_tex;
@@ -19,6 +18,13 @@ public class RadFoamWebGL : MonoBehaviour
     private Texture2D adjacency_diff_tex;
 
     private NativeArray<float4> points; // store this for finding the closest cell to the camera on the CPU
+
+    // Bounding box data
+    private bool _hasBoundingBox = false;
+    private Vector3 _boundingBoxCenter = Vector3.zero;
+    private Vector3 _boundingBoxSize = Vector3.zero;
+    private Quaternion _boundingBoxRotation = Quaternion.identity;
+    private Vector4[] _boundingPlanes = new Vector4[6];
 
     void Start()
     {
@@ -28,14 +34,193 @@ public class RadFoamWebGL : MonoBehaviour
 
     void OnDestroy()
     {
-        points.Dispose();
+        if (points.IsCreated)
+            points.Dispose();
         Destroy(blitMat);
     }
 
+    private bool ParseBoundingBoxFromPly(Model model)
+    {
+        try
+        {
+            // Check if the model has bounding box data 
+            if (model.HasBoundingBox)
+            {
+                _boundingBoxCenter = model.BoundingBoxCenter;
+                _boundingBoxSize = model.BoundingBoxSize;
+                _boundingBoxRotation = model.BoundingBoxRotation;
+                
+                // Calculate the 6 bounding planes from center, size, and rotation
+                CalculateBoundingPlanes();
+                
+                _hasBoundingBox = true;
+                Debug.Log($"Loaded bounding box from PLY: Center={_boundingBoxCenter}, Size={_boundingBoxSize}, Rotation={_boundingBoxRotation.eulerAngles}");
+                return true;
+            }
+            
+            // Try to find bounding_box element
+            try
+            {
+                ElementView boundingBoxView = model.element_view("bounding_box");
+                if (boundingBoxView.count > 0)
+                {
+                    PropertyView centerXView = boundingBoxView.property_view("center_x");
+                    PropertyView centerYView = boundingBoxView.property_view("center_y");
+                    PropertyView centerZView = boundingBoxView.property_view("center_z");
+                    
+                    PropertyView sizeXView = boundingBoxView.property_view("size_x");
+                    PropertyView sizeYView = boundingBoxView.property_view("size_y");
+                    PropertyView sizeZView = boundingBoxView.property_view("size_z");
+                    
+                    PropertyView rotXView = boundingBoxView.property_view("rotation_x");
+                    PropertyView rotYView = boundingBoxView.property_view("rotation_y");
+                    PropertyView rotZView = boundingBoxView.property_view("rotation_z");
+                    PropertyView rotWView = boundingBoxView.property_view("rotation_w");
+                    
+                    _boundingBoxCenter = new Vector3(
+                        centerXView.Get<float>(0),
+                        centerYView.Get<float>(0),
+                        centerZView.Get<float>(0)
+                    );
+                    
+                    _boundingBoxSize = new Vector3(
+                        sizeXView.Get<float>(0),
+                        sizeYView.Get<float>(0),
+                        sizeZView.Get<float>(0)
+                    );
+                    
+                    _boundingBoxRotation = new Quaternion(
+                        rotXView.Get<float>(0),
+                        rotYView.Get<float>(0),
+                        rotZView.Get<float>(0),
+                        rotWView.Get<float>(0)
+                    );
+
+                    // Calculate the bounding planes
+                    CalculateBoundingPlanes();
+                    
+                    _hasBoundingBox = true;
+                    Debug.Log($"Loaded bounding box from element: Center={_boundingBoxCenter}, Size={_boundingBoxSize}, Rotation={_boundingBoxRotation.eulerAngles}");
+                    return true;
+                }
+            }
+            catch (System.ArgumentException)
+            {
+                Debug.Log("No bounding_box element found in PLY data");
+            }
+            
+            // No bounding box found
+            _hasBoundingBox = false;
+            return false;
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogWarning($"Failed to parse bounding box data: {e.Message}");
+            _hasBoundingBox = false;
+            return false;
+        }
+    }
+
+    private bool ParseBoundingBoxFromComments(string headerText)
+    {
+        try
+        {
+            // Extract bounding box info from PLY comments
+            string[] lines = headerText.Split('\n');
+            string centerLine = null;
+            string sizeLine = null;
+            string rotationLine = null;
+            
+            foreach (string line in lines)
+            {
+                string trimmedLine = line.Trim();
+                if (trimmedLine.StartsWith("comment boundingbox_center"))
+                {
+                    centerLine = trimmedLine.Substring("comment boundingbox_center".Length).Trim();
+                }
+                else if (trimmedLine.StartsWith("comment boundingbox_size"))
+                {
+                    sizeLine = trimmedLine.Substring("comment boundingbox_size".Length).Trim();
+                }
+                else if (trimmedLine.StartsWith("comment boundingbox_rotation"))
+                {
+                    rotationLine = trimmedLine.Substring("comment boundingbox_rotation".Length).Trim();
+                }
+            }
+            
+            if (centerLine != null && sizeLine != null && rotationLine != null)
+            {
+                string[] centerParts = centerLine.Split(' ');
+                string[] sizeParts = sizeLine.Split(' ');
+                string[] rotationParts = rotationLine.Split(' ');
+                
+                if (centerParts.Length >= 3 && sizeParts.Length >= 3 && rotationParts.Length >= 4)
+                {
+                    _boundingBoxCenter = new Vector3(
+                        float.Parse(centerParts[0]),
+                        float.Parse(centerParts[1]),
+                        float.Parse(centerParts[2])
+                    );
+                    
+                    _boundingBoxSize = new Vector3(
+                        float.Parse(sizeParts[0]),
+                        float.Parse(sizeParts[1]),
+                        float.Parse(sizeParts[2])
+                    );
+                    
+                    _boundingBoxRotation = new Quaternion(
+                        float.Parse(rotationParts[0]),
+                        float.Parse(rotationParts[1]),
+                        float.Parse(rotationParts[2]),
+                        float.Parse(rotationParts[3])
+                    );
+
+                    // Calculate the bounding planes
+                    CalculateBoundingPlanes();
+                    
+                    _hasBoundingBox = true;
+                    Debug.Log($"Loaded bounding box from comments: Center={_boundingBoxCenter}, Size={_boundingBoxSize}, Rotation={_boundingBoxRotation.eulerAngles}");
+                    return true;
+                }
+            }
+            
+            _hasBoundingBox = false;
+            return false;
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogWarning($"Failed to parse bounding box from comments: {e.Message}");
+            _hasBoundingBox = false;
+            return false;
+        }
+    }
+
+    private void CalculateBoundingPlanes()
+    {
+        // Calculate the 6 bounding planes from center, size, and rotation
+        Vector3[] directions = {
+            Vector3.right, Vector3.left,    // X-axis planes
+            Vector3.up, Vector3.down,       // Y-axis planes
+            Vector3.forward, Vector3.back   // Z-axis planes
+        };
+        
+        _boundingPlanes = new Vector4[6];
+        for (int i = 0; i < 6; i++) {
+            // Transform the direction by rotation
+            Vector3 normal = _boundingBoxRotation * directions[i];
+            Vector3 planePos = _boundingBoxCenter + normal * (_boundingBoxSize[i/2] * 0.5f);
+            float distance = Vector3.Dot(normal, planePos);
+            // Store as (normal.xyz, distance)
+            _boundingPlanes[i] = new Vector4(normal.x, normal.y, normal.z, distance);
+        }
+    }
 
     public void Load()
     {
         using var model = Data.Load();
+
+        // Try to parse bounding box data
+        _hasBoundingBox = ParseBoundingBoxFromPly(model);
 
         var vertex_element = model.element_view("vertex");
         var adjacency_element = model.element_view("adjacency");
@@ -66,7 +251,7 @@ public class RadFoamWebGL : MonoBehaviour
             attr_tex.Apply(false, true);
         }
 
-        points = new NativeArray<float4>(vertex_tex_size, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        points = new NativeArray<float4>(vertex_tex_size, Allocator.Persistent, NativeArrayOptions.UninitializedMemory);
         var points_handle = new FillPointsDataJob {
             x = vertex_element.property_view("x"),
             y = vertex_element.property_view("y"),
@@ -103,16 +288,26 @@ public class RadFoamWebGL : MonoBehaviour
         adjacency_tex.Apply(false, true);
     }
 
+    void OnGUI()
+    {
+        if (_hasBoundingBox)
+        {
+            GUILayout.Label("Bounding Box: Active");
+            GUILayout.Label($"  Center: {_boundingBoxCenter}");
+            GUILayout.Label($"  Size: {_boundingBoxSize}");
+            GUILayout.Label($"  Rotation: {_boundingBoxRotation.eulerAngles}");
+        }
+        else
+        {
+            GUILayout.Label("Bounding Box: Not Active");
+        }
+    }
+
     void Update()
     {
         fisheye_fov = Mathf.Clamp(fisheye_fov + Input.mouseScrollDelta.y * -4, 10, 120);
-
-        // if (Input.GetKeyDown(KeyCode.Return)) {
-        //     OnDestroy();
-        //     using (var model = Model.from_file("C:/Users/Chris/Downloads/scene(3).ply")) {
-        //         Load(model, 3);
-        //     }
-        // }
+        
+        // No toggle - bounding box is always active if detected in the PLY
     }
 
     void OnRenderImage(RenderTexture srcRenderTex, RenderTexture outRenderTex)
@@ -139,6 +334,17 @@ public class RadFoamWebGL : MonoBehaviour
             blitMat.SetMatrix("_Camera2WorldMatrix", world_to_model * camera.cameraToWorldMatrix);
             blitMat.SetMatrix("_InverseProjectionMatrix", camera.projectionMatrix.inverse);
             blitMat.SetFloat("_FisheyeFOV", fisheye_fov);
+
+            // Set bounding box data
+            blitMat.SetInt("_HasBoundingBox", _hasBoundingBox ? 1 : 0);
+            if (_hasBoundingBox)
+            {
+                
+                for (int i = 0; i < 6; i++){
+                    _boundingPlanes[i] = _boundingPlanes[i];
+                }
+                blitMat.SetVectorArray("_BoundingPlanes", _boundingPlanes);
+            }
 
             blitMat.SetTexture("_positions_tex", positions_tex);
             blitMat.SetTexture("_adjacency_tex", adjacency_tex);

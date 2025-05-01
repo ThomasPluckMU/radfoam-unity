@@ -57,6 +57,9 @@ Shader "Hidden/Custom/RadFoamShader"
             sampler2D _adjacency_tex;
             float4 _adjacency_tex_TexelSize;
 
+            int _HasBoundingBox;
+            float4 _BoundingPlanes[6];
+
 
             blit_v2f blitvert(blit_data v)
             {
@@ -108,6 +111,47 @@ Shader "Hidden/Custom/RadFoamShader"
                 return tex2Dlod(_adjacency_diff_tex, float4(index_to_tex_buffer(i, _adjacency_tex_TexelSize.xy, 4096), 0, 0)).xyz;
             }
 
+            bool IsRayInsideBoundary(float3 currentPosition)
+            {
+                if (_HasBoundingBox == 0)
+                    return true;
+                
+                [unroll(6)]
+                for (int i = 0; i < 6; i++)
+                {
+                    float4 plane = _BoundingPlanes[i];
+                    if (dot(currentPosition, plane.xyz) + plane.w < 0)
+                        return false;
+                }
+                return true;
+            }
+
+            bool RayBoxIntersection(Ray ray, out float t_enter, out float t_exit)
+            {
+                t_enter = -1000000.0;
+                t_exit = 1000000.0;
+                
+                // Check all 6 boundary planes
+                for (int i = 0; i < 6; i++)
+                {
+                    float4 plane = _BoundingPlanes[i];
+                    float denom = dot(ray.direction, plane.xyz);
+                    
+                    float t = -(dot(ray.origin, plane.xyz) + plane.w) / denom;
+                    
+                    // Update entry/exit points based on plane orientation
+                    if (denom > 0) // Ray entering the boundary from outside
+                        t_enter = max(t_enter, t);
+                    else if (denom < 0) // Ray exiting the boundary from inside
+                        t_exit = min(t_exit, t);
+                    else if (dot(ray.origin, plane.xyz) + plane.w > 0) // Ray parallel to plane and outside boundary
+                        return false;
+                }
+                
+                // If entry > exit, ray misses box entirely
+                return t_enter <= t_exit && t_exit > 0;
+            }
+
             #define CHUNK_SIZE 8
 
             fixed4 frag (blit_v2f input) : SV_Target
@@ -119,18 +163,40 @@ Shader "Hidden/Custom/RadFoamShader"
                 }
                 ray.direction = normalize(ray.direction);
 
-                float scene_depth = 10000; 
-
+                float scene_depth = 10000;
                 float3 diffs[CHUNK_SIZE];
+
+                // Early exit: If we have a bounding box, test ray intersection with it
+                if (_HasBoundingBox != 0)
+                {
+                    float t_enter, t_exit;
+                    bool intersects = RayBoxIntersection(ray, t_enter, t_exit);
+                    
+                    // If ray misses the box entirely, return src_color immediately
+                    // if (!intersects)
+                    //      return src_color;
+                    if (!intersects)
+                        return float4(1,0,0,1);
+                    
+                    // Adjust starting t_0 to the entry point if the ray starts outside the box
+                    // This effectively jumps to the boundary
+                    float t_0 = t_enter;
+                    
+                    // Also limit scene_depth to t_exit
+                    scene_depth = min(scene_depth, t_exit);
+                    
+                    // If ray starts outside the box, move ray origin to the entry point
+                    ray.origin = ray.origin + ray.direction * t_enter;
+                }
 
                 // tracing state
                 uint cell = _start_index;
                 float transmittance = 1.0f;
                 float3 color = float3(0, 0, 0);
-                float t_0 = 0.0f;
+                float t_0 = 0.0;
 
                 int i = 0;
-                for (; i < 200 && transmittance > 0.1; i++) {
+                for (; i < 200 && transmittance > 0.01; i++) {
                     float4 cell_data = positions_buff(cell);
                     uint adj_from = cell > 0 ? asuint(positions_buff(cell - 1).w) : 0;
                     uint adj_to = asuint(cell_data.w);
@@ -163,16 +229,17 @@ Shader "Hidden/Custom/RadFoamShader"
                     float density = attrs.w;
                     float alpha = 1.0 - exp(-density * (t_1 - t_0));
                     float weight = transmittance * alpha;
-
-                    color += attrs.rgb * weight;
-                    transmittance = transmittance * (1.0 - alpha);
-
-                    if (next_face == 0xFFFFFFFF) {
-                        break;
-                    }
-
                     cell = adjacency_buffer(next_face);
                     t_0 = t_1;
+
+                    float3 rgb = pow(attrs.rgb, 2.2);
+                    color += rgb * weight;
+
+                    transmittance = transmittance * (1.0 - alpha);
+
+                    if (next_face == 0xFFFFFFFF || t_1 >= scene_depth) {
+                        break;
+                    }
                 }
 
                 return float4(lerp(color, src_color.xyz, transmittance), 1);

@@ -244,7 +244,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 81dacdeec5c9b30458012843f2f454fd, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  Data: {fileID: -4966213957662602761, guid: 23fcdcc2bb33b1a48b945f1bf1edf862, type: 3}
+  Data: {fileID: -4966213957662602761, guid: 68346367b2679db499bd54a4f14fd053, type: 3}
   fisheye_fov: 60
   Target: {fileID: 617752957}
 --- !u!1 &617752956
@@ -339,9 +339,16 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   sourceData: {fileID: -4966213957662602761, guid: 23fcdcc2bb33b1a48b945f1bf1edf862, type: 3}
-  visualScale: 0.0063
+  visualScale: 0.0225
   persistInScene: 1
-  maxPointsToRender: 200000
+  maxPointsToRender: 50000
+  selectedPointIndices: 
+  hiddenPointIndices: 
+  useBoundingBoxFilter: 1
+  boundingBoxCenter: {x: -0.17, y: 1.08, z: 1.41}
+  boundingBoxSize: {x: 4.858897, y: 3.4198747, z: 2.8136125}
+  boundingBoxRotation: {x: -0.32724842, y: -0, z: -0, w: 0.94493836}
+  boundingBoxHandle: {fileID: 0}
 --- !u!4 &1864478546
 Transform:
   m_ObjectHideFlags: 0
@@ -352,7 +359,7 @@ Transform:
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
   m_LocalPosition: {x: 0, y: 0.22, z: 2.51}
-  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_LocalScale: {x: 1, y: 1, z: 1.4379}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 0}

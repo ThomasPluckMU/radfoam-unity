@@ -24,6 +24,14 @@ namespace Ply
         [SerializeField] private List<int> hiddenPointIndices = new List<int>();
         private HashSet<int> hiddenPointsSet = new HashSet<int>();
         
+        // Bounding box filter
+        [SerializeField] private bool useBoundingBoxFilter = false;
+        [SerializeField] private Vector3 boundingBoxCenter = Vector3.zero;
+        [SerializeField] private Vector3 boundingBoxSize = new Vector3(10, 10, 10);
+        [SerializeField] private Quaternion boundingBoxRotation = Quaternion.identity;
+        [SerializeField] private GameObject boundingBoxHandle;
+        private Bounds localBoundingBox = new Bounds(Vector3.zero, new Vector3(10, 10, 10));
+        
         // Runtime data
         private Vector3[] points;
         private Color[] colors;
@@ -70,6 +78,54 @@ namespace Ply
             set => persistInScene = value;
         }
         
+        // Bounding box properties
+        public bool UseBoundingBoxFilter
+        {
+            get => useBoundingBoxFilter;
+            set 
+            { 
+                useBoundingBoxFilter = value;
+                UpdateBoundingBox();
+                isDirty = true;
+            }
+        }
+        
+        public Vector3 BoundingBoxCenter
+        {
+            get => boundingBoxCenter;
+            set
+            {
+                boundingBoxCenter = value;
+                UpdateBoundingBox();
+                isDirty = true;
+            }
+        }
+        
+        public Vector3 BoundingBoxSize
+        {
+            get => boundingBoxSize;
+            set
+            {
+                boundingBoxSize = value;
+                UpdateBoundingBox();
+                isDirty = true;
+            }
+        }
+        
+        public Quaternion BoundingBoxRotation
+        {
+            get => boundingBoxRotation;
+            set
+            {
+                boundingBoxRotation = value;
+                UpdateBoundingBox();
+                isDirty = true;
+            }
+        }
+        
+        public Bounds BoundingBox => new Bounds(boundingBoxCenter, boundingBoxSize);
+        public GameObject BoundingBoxHandle => boundingBoxHandle;
+        
         // Data access properties
         public Vector3[] Points
         {
@@ -103,7 +159,85 @@ namespace Ply
 
         public bool IsPointHidden(int index)
         {
-            return hiddenPointsSet.Contains(index);
+            if (index >= points.Length) return true;
+            
+            // First check if it's in the hidden set
+            if (hiddenPointsSet.Contains(index)) return true;
+            
+            // Then check if it's outside the bounding box when filtering is enabled
+            if (useBoundingBoxFilter)
+            {
+                Vector3 localPoint = Quaternion.Inverse(boundingBoxRotation) * (points[index] - boundingBoxCenter);
+                if (!localBoundingBox.Contains(localPoint))
+                    return true;
+            }
+                
+            return false;
+        }
+
+        public void UpdateBoundingBox()
+        {
+            localBoundingBox = new Bounds(Vector3.zero, boundingBoxSize);
+            
+            // Create or update the handle object if needed
+            #if UNITY_EDITOR
+            if (useBoundingBoxFilter && boundingBoxHandle == null)
+            {
+                #if UNITY_EDITOR
+                UnityEditor.EditorApplication.delayCall += () => {
+                    if (this != null && useBoundingBoxFilter)
+                        CreateBoundingBoxHandle();
+                };
+                #endif
+            }
+            else if (!useBoundingBoxFilter && boundingBoxHandle != null)
+            {
+                DestroyImmediate(boundingBoxHandle);
+            }
+            
+            if (boundingBoxHandle != null)
+            {
+                boundingBoxHandle.transform.position = boundingBoxCenter;
+                boundingBoxHandle.transform.rotation = boundingBoxRotation;
+                boundingBoxHandle.transform.localScale = boundingBoxSize;
+            }
+            #endif
+            
+            isDirty = true;
+        }
+        
+        #if UNITY_EDITOR
+        private void CreateBoundingBoxHandle()
+        {
+            boundingBoxHandle = new GameObject("BoundingBoxHandle");
+            boundingBoxHandle.transform.position = boundingBoxCenter;
+            boundingBoxHandle.transform.rotation = boundingBoxRotation;
+            boundingBoxHandle.transform.localScale = boundingBoxSize;
+            boundingBoxHandle.AddComponent<BoundingBoxHandle>().parentProxy = this;
+            boundingBoxHandle.hideFlags = HideFlags.DontSave;
+            
+            // Ensure handle doesn't persist in play mode
+            if (UnityEditor.EditorApplication.isPlaying)
+            {
+                UnityEditor.EditorApplication.delayCall += () => {
+                    DestroyImmediate(boundingBoxHandle);
+                };
+            }
+        }
+        #endif
+        
+        public void SyncHandleTransform()
+        {
+            #if UNITY_EDITOR
+            if (boundingBoxHandle != null)
+            {
+                boundingBoxCenter = boundingBoxHandle.transform.position;
+                boundingBoxRotation = boundingBoxHandle.transform.rotation;
+                boundingBoxSize = boundingBoxHandle.transform.localScale;
+                isDirty = true;
+                UnityEditor.EditorUtility.SetDirty(this);
+            }
+            #endif
         }
 
         public void HideSelectedPoints()
@@ -130,55 +264,19 @@ namespace Ply
         public Vector3[] GetVisiblePoints()
         {
             if (isDirty) RefreshData();
-            if (points == null || hiddenPointsSet.Count == 0)
-                return points;
-                
-            Vector3[] visiblePoints = new Vector3[points.Length - hiddenPointsSet.Count];
-            int destIndex = 0;
+            if (points == null) return points;
+            
+            List<Vector3> visiblePoints = new List<Vector3>();
+            
             for (int i = 0; i < points.Length; i++)
             {
-                if (!hiddenPointsSet.Contains(i))
-                {
-                    visiblePoints[destIndex++] = points[i];
-                }
-            }
-            return visiblePoints;
-        }
-
-        public bool ExportVisiblePoints(string savePath)
-        {
-            if (Points == null || Colors == null)
-                return false;
-                
-            // Calculate how many visible points we have
-            int visibleCount = 0;
-            for (int i = 0; i < Points.Length; i++)
-            {
-                if (!IsPointHidden(i))
-                    visibleCount++;
-            }
-            
-            // Early exit if no visible points
-            if (visibleCount == 0)
-                return false;
-            
-            // Collect only visible points and their colors
-            Vector3[] visiblePoints = new Vector3[visibleCount];
-            Color[] visibleColors = new Color[visibleCount];
-            
-            int index = 0;
-            for (int i = 0; i < Points.Length; i++)
-            {
                 if (!IsPointHidden(i))
                 {
-                    visiblePoints[index] = Points[i];
-                    visibleColors[index] = Colors[i];
-                    index++;
+                    visiblePoints.Add(points[i]);
                 }
             }
             
-            // Export to PLY format
-            return PlyExporter.ExportPointCloud(savePath, visiblePoints, visibleColors);
+            return visiblePoints.ToArray();
         }
 
         public void SelectPoint(int index)
@@ -213,6 +311,8 @@ namespace Ply
         private void OnEnable()
         {
             isDirty = true;
+            UpdateBoundingBox();
+            
             #if UNITY_EDITOR
             if (UnityEditor.EditorApplication.isPlayingOrWillChangePlaymode) return;
             UnityEditor.EditorApplication.delayCall += () => {
@@ -243,7 +343,21 @@ namespace Ply
 
         private void OnValidate()
         {
+            UpdateBoundingBox();
             isDirty = true;
+        }
+
+        // Draw the bounding box as a gizmo
+        private void OnDrawGizmosSelected()
+        {
+            if (useBoundingBoxFilter)
+            {
+                Gizmos.color = new Color(0.2f, 0.8f, 0.2f, 0.3f);
+                Gizmos.DrawCube(boundingBoxCenter, boundingBoxSize);
+                
+                Gizmos.color = new Color(0.2f, 0.8f, 0.2f, 1.0f);
+                Gizmos.DrawWireCube(boundingBoxCenter, boundingBoxSize);
+            }
         }
 
         public void RefreshData()

@@ -52,12 +52,19 @@ namespace Ply
             HandleSelectionInput(e, sceneView);
             HandlePointHover(e, sceneView);
             DrawGLBillboards(sceneView);
+            DrawBoundingBoxes();
             OnGUI(sceneView);
 
             if (isSelectingRect)
             {
                 sceneView.Repaint();
             }
+        }
+
+        private static void DrawBoundingBoxes()
+        {
+            // Bounding boxes are now drawn by the BoundingBoxHandle component
+            // This method is kept for compatibility but no longer needs to do anything
         }
 
         private static void HandleSelectionInput(Event e, SceneView sceneView)
