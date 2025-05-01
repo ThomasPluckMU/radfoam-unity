@@ -451,6 +451,25 @@ namespace Ply
                         Debug.Log("No color properties found in PLY data, exporting positions only");
                     }
 
+                    // Get adjacency data for Voronoi cells
+                    ElementView adjacencyElement = default;
+                    PropertyView adjacencyOffsetView = default;
+                    PropertyView adjacencyView = default;
+                    bool hasAdjacencyData = false;
+
+                    try
+                    {
+                        adjacencyElement = model.element_view("adjacency");
+                        adjacencyOffsetView = vertexView.property_view("adjacency_offset");
+                        adjacencyView = adjacencyElement.property_view("adjacency");
+                        hasAdjacencyData = true;
+                        Debug.Log("Found adjacency data for Voronoi cells");
+                    }
+                    catch (ArgumentException)
+                    {
+                        Debug.LogError("No adjacency data found - will only filter by point position");
+                    }
+
                     // Create bounding box filter
                     Matrix4x4 worldToLocal = Matrix4x4.identity;
                     Bounds localBounds = new Bounds(Vector3.zero, Vector3.one);
@@ -461,7 +480,8 @@ namespace Ply
                         localBounds = new Bounds(Vector3.zero, size);
                     }
 
-                    // First pass: collect points to export
+                    // First pass: collect points that are directly inside the bounding box
+                    HashSet<int> relevantPoints = new HashSet<int>();
                     HashSet<int> hiddenPoints = new HashSet<int>();
                     
                     if (useFilter)
@@ -479,13 +499,90 @@ namespace Ply
                                 zView.Get<float>(i)
                             );
                             
-                            // Check if point is outside the bounding box
+                            // Check if point is inside the bounding box
                             Vector3 localPoint = worldToLocal.MultiplyPoint3x4(position);
-                            if (!localBounds.Contains(localPoint))
+                            if (localBounds.Contains(localPoint))
                             {
+                                relevantPoints.Add(i);
+                            }
+                            else
+                            {
+                                // Temporary add to hidden points - we'll remove some later
                                 hiddenPoints.Add(i);
                             }
                         }
+
+                        // Second pass: for points inside the box, check their neighbors
+                        if (hasAdjacencyData)
+                        {
+                            Debug.Log($"Found {relevantPoints.Count} points inside box, now checking neighbors...");
+                            HashSet<int> borderPoints = new HashSet<int>();
+                            
+                            foreach (int pointIndex in relevantPoints)
+                            {
+                                // Get adjacency offset and count
+                                uint adjOffset = adjacencyOffsetView.Get<uint>(pointIndex);
+                                
+                                // Determine number of neighbors by looking at next point's offset or total count
+                                uint nextOffset;
+                                if (pointIndex < totalVertices - 1)
+                                {
+                                    nextOffset = adjacencyOffsetView.Get<uint>(pointIndex + 1);
+                                }
+                                else
+                                {
+                                    nextOffset = (uint)adjacencyElement.count;
+                                }
+                                
+                                int neighborCount = (int)(nextOffset - adjOffset);
+                                
+                                // Get the position of this point
+                                Vector3 pointPos = new Vector3(
+                                    xView.Get<float>(pointIndex),
+                                    yView.Get<float>(pointIndex),
+                                    zView.Get<float>(pointIndex)
+                                );
+                                
+                                // Check each neighbor
+                                for (int j = 0; j < neighborCount; j++)
+                                {
+                                    uint neighborIndex = adjacencyView.Get<uint>((int)adjOffset + j);
+                                    
+                                    // Skip if already marked as relevant
+                                    if (relevantPoints.Contains((int)neighborIndex))
+                                        continue;
+                                        
+                                    // Get neighbor position
+                                    Vector3 neighborPos = new Vector3(
+                                        xView.Get<float>((int)neighborIndex),
+                                        yView.Get<float>((int)neighborIndex),
+                                        zView.Get<float>((int)neighborIndex)
+                                    );
+                                    
+                                    // For Voronoi cells, the boundary between two cells lies on the perpendicular
+                                    // bisector of the line connecting their centroids.
+                                    // We'll check if this boundary intersects our bounding box
+                                    
+                                    // For simplicity, we'll check if the line segment between the points
+                                    // intersects the bounding box - this is a conservative approximation
+                                    if (LineIntersectsBounds(pointPos, neighborPos, center, size, rotation))
+                                    {
+                                        borderPoints.Add((int)neighborIndex);
+                                        // Remove from hidden points if it was there
+                                        hiddenPoints.Remove((int)neighborIndex);
+                                    }
+                                }
+                            }
+                            
+                            Debug.Log($"Found {borderPoints.Count} additional border points");
+                            // Add border points to relevant points
+                            relevantPoints.UnionWith(borderPoints);
+                        }
+                        
+                        // Now hiddenPoints should only contain points that are:
+                        // 1. Outside the bounding box
+                        // 2. Not neighbors to points inside the box
+                        Debug.Log($"Filtering out {hiddenPoints.Count} points of {totalVertices} total points");
                     }
                     
                     return ExportWithIndices(path, sourceData, hiddenPoints);
@@ -496,6 +593,64 @@ namespace Ply
                 Debug.LogError($"Error in PLY export: {e.Message}\n{e.StackTrace}");
                 return false;
             }
+        }
+
+        // Helper method to check if a line segment between two points intersects a bounding box
+        private static bool LineIntersectsBounds(Vector3 p1, Vector3 p2, Vector3 boxCenter, Vector3 boxSize, Quaternion boxRotation)
+        {
+            // Transform points to local space of the bounding box
+            Matrix4x4 worldToLocal = Matrix4x4.TRS(boxCenter, boxRotation, Vector3.one).inverse;
+            Vector3 localP1 = worldToLocal.MultiplyPoint3x4(p1);
+            Vector3 localP2 = worldToLocal.MultiplyPoint3x4(p2);
+            
+            // Create local bounds
+            Bounds localBounds = new Bounds(Vector3.zero, boxSize);
+            
+            // Quick check - if either point is inside, the line intersects
+            if (localBounds.Contains(localP1) || localBounds.Contains(localP2))
+                return true;
+            
+            // Check if the line segment intersects any of the 6 faces of the box
+            Vector3 min = localBounds.min;
+            Vector3 max = localBounds.max;
+            
+            // Check each axis
+            return 
+                IntersectsAxisAlignedPlane(localP1, localP2, 0, min.x, min.y, max.y, min.z, max.z) || // Left face
+                IntersectsAxisAlignedPlane(localP1, localP2, 0, max.x, min.y, max.y, min.z, max.z) || // Right face
+                IntersectsAxisAlignedPlane(localP1, localP2, 1, min.y, min.x, max.x, min.z, max.z) || // Bottom face
+                IntersectsAxisAlignedPlane(localP1, localP2, 1, max.y, min.x, max.x, min.z, max.z) || // Top face
+                IntersectsAxisAlignedPlane(localP1, localP2, 2, min.z, min.x, max.x, min.y, max.y) || // Back face
+                IntersectsAxisAlignedPlane(localP1, localP2, 2, max.z, min.x, max.x, min.y, max.y);   // Front face
+        }
+
+        // Helper method to check if a line segment intersects an axis-aligned plane
+        private static bool IntersectsAxisAlignedPlane(Vector3 p1, Vector3 p2, int axis, float planeCoord,
+            float minA, float maxA, float minB, float maxB)
+        {
+            // Get the coordinates for the two other axes
+            int axisA = (axis + 1) % 3;
+            int axisB = (axis + 2) % 3;
+            
+            // If both points are on the same side of the plane, no intersection
+            if ((p1[axis] < planeCoord && p2[axis] < planeCoord) || 
+                (p1[axis] > planeCoord && p2[axis] > planeCoord))
+                return false;
+            
+            // Compute the intersection point on the plane
+            float t = (planeCoord - p1[axis]) / (p2[axis] - p1[axis]);
+            
+            // Check if t is between 0 and 1 (line segment, not full line)
+            if (t < 0 || t > 1)
+                return false;
+            
+            // Compute the intersection coordinates on the other two axes
+            float intersectA = p1[axisA] + t * (p2[axisA] - p1[axisA]);
+            float intersectB = p1[axisB] + t * (p2[axisB] - p1[axisB]);
+            
+            // Check if the intersection point is within the bounds of the face
+            return intersectA >= minA && intersectA <= maxA && 
+                intersectB >= minB && intersectB <= maxB;
         }
 
         private static void WriteHeader(BinaryWriter writer, int pointCount, bool includeColors)
