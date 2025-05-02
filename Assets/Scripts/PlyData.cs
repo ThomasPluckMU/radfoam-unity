@@ -14,29 +14,29 @@ namespace Ply
 
         [SerializeField]
         private TextAsset binary;
-        
+
         [SerializeField]
-        private bool hasBoundingBox;
-        
+        private bool hasTSRData;
+
         [SerializeField]
-        private Vector3 boundingBoxCenter;
-        
+        private Vector3 translation;
+
         [SerializeField]
-        private Vector3 boundingBoxSize;
-        
+        private Vector3 scale;
+
         [SerializeField]
-        private Quaternion boundingBoxRotation;
+        private Quaternion rotation;
 
         public Element[] Elements { get => elements; }
         public TextAsset Binary { get => binary; }
-        public bool HasBoundingBox { get => hasBoundingBox; }
-        public Vector3 BoundingBoxCenter { get => boundingBoxCenter; }
-        public Vector3 BoundingBoxSize { get => boundingBoxSize; }
-        public Quaternion BoundingBoxRotation { get => boundingBoxRotation; }
+        public bool HasTSRData { get => hasTSRData; }
+        public Vector3 Translation { get => translation; }
+        public Vector3 Scale { get => scale; }
+        public Quaternion Rotation { get => rotation; }
 
         public void ReadFromStream(FileStream stream)
         {
-            var (header, read_count, boundingBoxData) = PlyDataParser.read_header(stream);
+            var (header, read_count, tsr) = PlyDataParser.read_header(stream);
             using var binary_data = PlyDataParser.read_binary_blob(stream, read_count, Allocator.Temp);
             var binary_asset = new TextAsset(binary_data) {
                 name = "binary_data"
@@ -44,23 +44,16 @@ namespace Ply
             elements = header;
             binary = binary_asset;
             
-            // Set bounding box data if it was found in the header
-            if (boundingBoxData.HasBoundingBox)
-            {
-                hasBoundingBox = true;
-                boundingBoxCenter = boundingBoxData.Center;
-                boundingBoxSize = boundingBoxData.Size;
-                boundingBoxRotation = boundingBoxData.Rotation;
-            }
-            else
-            {
-                hasBoundingBox = false;
-            }
+            // Store TSR data if available
+            hasTSRData = tsr.hasTSRData;
+            translation = tsr.translation;
+            scale = tsr.scale;
+            rotation = tsr.rotation;
         }
 
         public Model Load()
         {
-            return new Model(elements, binary.GetData<byte>(), hasBoundingBox, boundingBoxCenter, boundingBoxSize, boundingBoxRotation);
+            return new Model(elements, binary.GetData<byte>());
         }
     }
 
@@ -77,15 +70,6 @@ namespace Ply
         public DataType data_type;
 
         public int byte_size() => data_type.byte_size();
-    }
-
-    [Serializable]
-    public struct BoundingBoxData
-    {
-        public bool HasBoundingBox;
-        public Vector3 Center;
-        public Vector3 Size;
-        public Quaternion Rotation;
     }
 
     [Serializable]
@@ -109,12 +93,6 @@ namespace Ply
     {
         private readonly NativeArray<byte> binary_blob;
         private readonly (string, ElementView)[] element_views;
-        
-        // Bounding box data
-        public readonly bool HasBoundingBox;
-        public readonly Vector3 BoundingBoxCenter;
-        public readonly Vector3 BoundingBoxSize;
-        public readonly Quaternion BoundingBoxRotation;
 
         public static Model from_file(string path, Allocator alloc = Allocator.TempJob)
         {
@@ -124,30 +102,13 @@ namespace Ply
 
         public static Model from_stream(Stream stream, Allocator alloc = Allocator.TempJob)
         {
-            var (header, read_count, boundingBoxData) = PlyDataParser.read_header(stream);
-            var binary_blob = PlyDataParser.read_binary_blob(stream, read_count, alloc);
-            return new Model(
-                header, 
-                binary_blob, 
-                boundingBoxData.HasBoundingBox,
-                boundingBoxData.Center,
-                boundingBoxData.Size,
-                boundingBoxData.Rotation
-            );
+            var (header, read_count, _) = PlyDataParser.read_header(stream);
+            return new Model(header, PlyDataParser.read_binary_blob(stream, read_count, alloc));
         }
 
         public Model(Element[] elements, NativeArray<byte> binary_blob)
-            : this(elements, binary_blob, false, Vector3.zero, Vector3.zero, Quaternion.identity)
-        {
-        }
-
-        public Model(Element[] elements, NativeArray<byte> binary_blob, bool hasBoundingBox, Vector3 center, Vector3 size, Quaternion rotation)
         {
             this.binary_blob = binary_blob;
-            this.HasBoundingBox = hasBoundingBox;
-            this.BoundingBoxCenter = center;
-            this.BoundingBoxSize = size;
-            this.BoundingBoxRotation = rotation;
 
             element_views = new (string, ElementView)[elements.Length];
             var element_offset = 0;
@@ -179,20 +140,6 @@ namespace Ply
                 }
             }
             throw new ArgumentException(element);
-        }
-
-        public bool TryGetElementView(string element, out ElementView view)
-        {
-            for (var e = 0; e < element_views.Length; e++)
-            {
-                if (element_views[e].Item1 == element)
-                {
-                    view = element_views[e].Item2;
-                    return true;
-                }
-            }
-            view = default;
-            return false;
         }
 
         public void Dispose()
@@ -228,26 +175,6 @@ namespace Ply
             if (offset < 0)
                 throw new ArgumentException(property);
             return new PropertyView(data, count, stride, offset);
-        }
-
-        public bool TryGetPropertyView(string property, out PropertyView view)
-        {
-            var offset = -1;
-            for (var i = 0; i < properties.Length; i++)
-            {
-                if (properties[i].Item1 == property)
-                {
-                    offset = properties[i].Item2;
-                    break;
-                }
-            }
-            if (offset < 0)
-            {
-                view = default;
-                return false;
-            }
-            view = new PropertyView(data, count, stride, offset);
-            return true;
         }
 
         public PropertyView dummy_property_view()
@@ -306,6 +233,23 @@ namespace Ply
         }
     }
 
+    // Added TSRData struct to hold the Translation, Scale, Rotation data
+    public struct TSRData
+    {
+        public bool hasTSRData;
+        public Vector3 translation;
+        public Vector3 scale;
+        public Quaternion rotation;
+
+        public TSRData(bool hasTSRData, Vector3 translation, Vector3 scale, Quaternion rotation)
+        {
+            this.hasTSRData = hasTSRData;
+            this.translation = translation;
+            this.scale = scale;
+            this.rotation = rotation;
+        }
+    }
+
     public static class PlyDataParser
     {
         public const int MAX_HEADER_LINES = 256;
@@ -348,7 +292,7 @@ namespace Ply
             };
         }
 
-        public static (Element[], int, BoundingBoxData) read_header(Stream stream)
+        public static (Element[], int, TSRData) read_header(Stream stream)
         {
             var reader = new StreamReader(stream);
             var read_count = 0;
@@ -372,12 +316,12 @@ namespace Ply
             string name = "";
             int count = -1;
             List<Property> properties = new();
-            
-            // Bounding box data from comments
-            bool hasBoundingBox = false;
-            Vector3 boundingBoxCenter = Vector3.zero;
-            Vector3 boundingBoxSize = Vector3.zero;
-            Quaternion boundingBoxRotation = Quaternion.identity;
+
+            // Initialize TSR data components
+            bool hasTSRData = false;
+            Vector3 translation = Vector3.zero;
+            Vector3 scale = Vector3.one;
+            Quaternion rotation = Quaternion.identity;
 
             void add_current_element()
             {
@@ -386,77 +330,61 @@ namespace Ply
             }
 
             for (int line = 0; line < MAX_HEADER_LINES; ++line) {
-                var lineText = read_next_line();
-                var col = lineText.Split();
-                
-                if (col.Length == 0)
-                    continue;
-                    
-                try
-                {
-                    var kind = line_kind_from_name(col[0]);
-                    if (kind == HeaderLineKind.Element) {
-                        add_current_element();
-                        name = col[1];
-                        count = Convert.ToInt32(col[2]);
-                        properties.Clear();
-                    } else if (kind == HeaderLineKind.Property) {
-                        properties.Add(new Property { name = col[2], data_type = data_type_from_name(col[1]) });
-                    } else if (kind == HeaderLineKind.Comment) {
-                        // Parse bounding box comments
-                        if (col.Length > 2) {
-                            if (col[1] == "boundingbox_center" && col.Length >= 5) {
-                                float x = float.Parse(col[2]);
-                                float y = float.Parse(col[3]);
-                                float z = float.Parse(col[4]);
-                                boundingBoxCenter = new Vector3(x, y, z);
-                                hasBoundingBox = true;
-                            }
-                            else if (col[1] == "boundingbox_size" && col.Length >= 5) {
-                                float x = float.Parse(col[2]);
-                                float y = float.Parse(col[3]);
-                                float z = float.Parse(col[4]);
-                                boundingBoxSize = new Vector3(x, y, z);
-                            }
-                            else if (col[1] == "boundingbox_rotation" && col.Length >= 6) {
-                                float x = float.Parse(col[2]);
-                                float y = float.Parse(col[3]);
-                                float z = float.Parse(col[4]);
-                                float w = float.Parse(col[5]);
-                                boundingBoxRotation = new Quaternion(x, y, z, w);
-                            }
+                var col = read_next_line().Split();
+                var kind = line_kind_from_name(col[0]);
+                if (kind == HeaderLineKind.Element) {
+                    add_current_element();
+                    name = col[1];
+                    count = Convert.ToInt32(col[2]);
+                    properties.Clear();
+                } else if (kind == HeaderLineKind.Property) {
+                    properties.Add(new Property { name = col[2], data_type = data_type_from_name(col[1]) });                    
+                } else if (kind == HeaderLineKind.Comment) {
+                    // Parse comment lines for TSR data
+                    if (col.Length >= 3) {
+                        // Check for Translation (center) data
+                        if (col[1] == "bb_center_x") {
+                            hasTSRData = true;
+                            translation.x = float.Parse(col[2]);
+                        } else if (col[1] == "bb_center_y") {
+                            translation.y = float.Parse(col[2]);
+                        } else if (col[1] == "bb_center_z") {
+                            translation.z = float.Parse(col[2]);
                         }
-                    } else if (kind == HeaderLineKind.EndHeader) {
-                        add_current_element();
-                        break;
+                        // Check for Scale (size) data
+                        else if (col[1] == "bb_size_x") {
+                            scale.x = float.Parse(col[2]);
+                        } else if (col[1] == "bb_size_y") {
+                            scale.y = float.Parse(col[2]);
+                        } else if (col[1] == "bb_size_z") {
+                            scale.z = float.Parse(col[2]);
+                        }
+                        // Check for Rotation data
+                        else if (col[1] == "bb_rotation_x") {
+                            rotation.x = float.Parse(col[2]);
+                        } else if (col[1] == "bb_rotation_y") {
+                            rotation.y = float.Parse(col[2]);
+                        } else if (col[1] == "bb_rotation_z") {
+                            rotation.z = float.Parse(col[2]);
+                        } else if (col[1] == "bb_rotation_w") {
+                            rotation.w = float.Parse(col[2]);
+                        }
                     }
-                }
-                catch (Exception e)
-                {
-                    Debug.LogWarning($"Error parsing PLY header line: {lineText}. Error: {e.Message}");
-                    // Continue processing the file even if one line has an error
+                } else if (kind == HeaderLineKind.EndHeader) {
+                    add_current_element();
+                    break;
                 }
             }
             
-            // Validate the bounding box data
-            if (hasBoundingBox && (boundingBoxSize == Vector3.zero || boundingBoxRotation.x == 0 && boundingBoxRotation.y == 0 && 
-                                   boundingBoxRotation.z == 0 && boundingBoxRotation.w == 0))
-            {
-                // If we're missing size or rotation but have a center, set some defaults
-                if (boundingBoxSize == Vector3.zero)
-                    boundingBoxSize = new Vector3(1, 1, 1);
-                if (boundingBoxRotation.x == 0 && boundingBoxRotation.y == 0 && boundingBoxRotation.z == 0 && boundingBoxRotation.w == 0)
-                    boundingBoxRotation = Quaternion.identity;
-            }
+            // Create a TSRData struct to return with the header information
+            TSRData tsrData = new TSRData(
+                hasTSRData, 
+                translation, 
+                scale, 
+                rotation
+            );
             
-            var boundingBoxData = new BoundingBoxData {
-                HasBoundingBox = hasBoundingBox,
-                Center = boundingBoxCenter,
-                Size = boundingBoxSize,
-                Rotation = boundingBoxRotation
-            };
-            
-            return (elements.ToArray(), read_count, boundingBoxData);
+            return (elements.ToArray(), read_count, tsrData);
         }
 
         public static NativeArray<byte> read_binary_blob(Stream stream, int binary_offset, Allocator alloc = Allocator.Persistent)

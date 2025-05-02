@@ -4,8 +4,6 @@ using Unity.Collections;
 using Unity.Jobs;
 using Unity.Mathematics;
 using UnityEngine;
-using System.Collections.Generic;
-using System;
 
 public class RadFoamWebGL : MonoBehaviour
 {
@@ -13,33 +11,28 @@ public class RadFoamWebGL : MonoBehaviour
     public float fisheye_fov = 60;
     public Transform Target;
     
-    [Tooltip("Toggle to show or hide infinite cells")]
-    public bool showUnboundedCells = false; // Toggle for infinite cells
+    [Tooltip("Override the bounding box settings from the PLY file")]
+    public bool overrideBoundingBox = false;
+    public Vector3 boundingBoxCenter = Vector3.zero;
+    public Vector3 boundingBoxSize = Vector3.one;
+    public Quaternion boundingBoxRotation = Quaternion.identity;
 
     private Material blitMat;
     private Texture2D positions_tex;
     private Texture2D attr_tex;
     private Texture2D adjacency_tex;
     private Texture2D adjacency_diff_tex;
-    private Texture2D convex_hull_tex; // Texture to identify cells on the convex hull
-
     private NativeArray<float4> points; // store this for finding the closest cell to the camera on the CPU
 
-    // GUI toggle settings
-    private Rect toggleButtonRect;
-    private GUIStyle buttonStyle;
+    private bool _HasBoundingBox = false;
+    private Vector3 _BoundingBoxCenter = Vector3.zero;
+    private Vector3 _BoundingBoxSize = Vector3.one;
+    private Quaternion _BoundingBoxRotation = Quaternion.identity;
 
     void Start()
     {
         blitMat = new Material(Shader.Find("Hidden/Custom/RadFoamShader"));
         Load();
-        ComputeConvexHull(); // Compute convex hull after loading data
-        
-        // Setup GUI elements
-        toggleButtonRect = new Rect(10, 10, 150, 30);
-        buttonStyle = new GUIStyle(GUI.skin.button);
-        buttonStyle.fontSize = 14;
-        buttonStyle.normal.textColor = Color.white;
     }
 
     void OnDestroy()
@@ -52,461 +45,154 @@ public class RadFoamWebGL : MonoBehaviour
     void Update()
     {
         fisheye_fov = Mathf.Clamp(fisheye_fov + Input.mouseScrollDelta.y * -4, 10, 120);
+    }
+
+    public void Load()
+    {
+        // First, check if the PlyData has TSR information
+        InitializeBoundingBox();
         
-        // Update shader with current unbounded cells setting
-        blitMat.SetInt("_ShowUnboundedCells", showUnboundedCells ? 1 : 0);
+        using var model = Data.Load();
+
+        var vertex_element = model.element_view("vertex");
+        var adjacency_element = model.element_view("adjacency");
+        var vertex_count = vertex_element.count;
+        var adjacency_count = adjacency_element.count;
+
+        var vertex_tex_width = 4096;
+        var vertex_tex_height = Mathf.CeilToInt(vertex_count / (float)vertex_tex_width);
+        var vertex_tex_size = vertex_tex_width * vertex_tex_height;
+
+        var adj_tex_width = 4096;
+        var adj_tex_height = Mathf.CeilToInt(adjacency_count / (float)adj_tex_width);
+        var adj_tex_size = adj_tex_width * adj_tex_height;
+
+        // filling buffers one after the other, to ensure we don't run out of memory on webgl
+        {
+            using var attributes = new NativeArray<half4>(vertex_tex_size, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+            new FillColorDataJob {
+                r = vertex_element.property_view("red"),
+                g = vertex_element.property_view("green"),
+                b = vertex_element.property_view("blue"),
+                density = vertex_element.property_view("density"),
+                attributes = attributes,
+            }.Schedule(vertex_count, 512).Complete();
+            attr_tex = new Texture2D(vertex_tex_width, vertex_tex_height, TextureFormat.RGBAHalf, 0, true, true);
+            attr_tex.filterMode = FilterMode.Point;
+            attr_tex.SetPixelData(attributes, 0, 0);
+            attr_tex.Apply(false, true);
+        }
+
+        points = new NativeArray<float4>(vertex_tex_size, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        var points_handle = new FillPointsDataJob {
+            x = vertex_element.property_view("x"),
+            y = vertex_element.property_view("y"),
+            z = vertex_element.property_view("z"),
+            adj_offset = vertex_element.property_view("adjacency_offset"),
+            points = points
+        }.Schedule(vertex_count, 512);
+
+        using var adjacency = new NativeArray<uint>(adj_tex_size, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        var adjacency_handle = new ReadUintJob {
+            view = adjacency_element.property_view("adjacency"),
+            target = adjacency
+        }.Schedule(adjacency_count, 512);
+
+        points_handle.Complete();
+        adjacency_handle.Complete();
+        model.Dispose(); // we can already dispose of the ply model here, as all data is already loaded.. reducing RAM usage maybe?
+
+        using var adj_diff = new NativeArray<half4>(adj_tex_size, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        new BuildAdjDiff { positions = points, adjacency = adjacency, adjacency_diff = adj_diff }.Schedule(vertex_count, 512).Complete();
+        adjacency_diff_tex = new Texture2D(adj_tex_width, adj_tex_height, TextureFormat.RGBAHalf, 0, true, true);
+        adjacency_diff_tex.filterMode = FilterMode.Point;
+        adjacency_diff_tex.SetPixelData(adj_diff, 0, 0);
+        adjacency_diff_tex.Apply(false, true);
+
+        positions_tex = new Texture2D(vertex_tex_width, vertex_tex_height, TextureFormat.RGBAFloat, 0, true, true);
+        positions_tex.filterMode = FilterMode.Point;
+        positions_tex.SetPixelData(points, 0, 0);
+        positions_tex.Apply(false, true);
+
+        adjacency_tex = new Texture2D(adj_tex_width, adj_tex_height, TextureFormat.RFloat, 0, true, true);
+        adjacency_tex.filterMode = FilterMode.Point;
+        adjacency_tex.SetPixelData(adjacency, 0, 0);
+        adjacency_tex.Apply(false, true);
+    }
+    
+    void InitializeBoundingBox()
+    {
+        // If we're overriding the bounding box settings from the inspector, use those
+        if (overrideBoundingBox)
+        {
+            _HasBoundingBox = true;
+            _BoundingBoxCenter = boundingBoxCenter;
+            _BoundingBoxSize = boundingBoxSize;
+            _BoundingBoxRotation = boundingBoxRotation;
+            Debug.Log("Using manual bounding box settings");
+        }
+        // Otherwise, check if the PlyData has TSR information
+        else if (Data != null && Data.HasTSRData)
+        {
+            _HasBoundingBox = true;
+            _BoundingBoxCenter = Data.Translation;
+            _BoundingBoxSize = Data.Scale;
+            _BoundingBoxRotation = Data.Rotation;
+            Debug.Log($"Using bounding box from PLY file: Center={_BoundingBoxCenter}, Size={_BoundingBoxSize}");
+        }
+        else
+        {
+            _HasBoundingBox = false;
+            Debug.Log("No bounding box information available");
+        }
+        
+        // For debugging, show bounding box settings in editor view
+        if (_HasBoundingBox)
+        {
+            // Update inspector values to reflect what's being used
+            boundingBoxCenter = _BoundingBoxCenter;
+            boundingBoxSize = _BoundingBoxSize;
+            boundingBoxRotation = _BoundingBoxRotation;
+        }
     }
     
     void OnGUI()
     {
-        // Create a toggle button for showing/hiding unbounded cells
-        string buttonText = showUnboundedCells ? "Hide Unbounded Cells" : "Show Unbounded Cells";
-        GUI.backgroundColor = showUnboundedCells ? Color.green : Color.red;
-        
-        if (GUI.Button(toggleButtonRect, buttonText, buttonStyle))
-        {
-            showUnboundedCells = !showUnboundedCells;
-            blitMat.SetInt("_ShowUnboundedCells", showUnboundedCells ? 1 : 0);
-        }
-        
         // Show FOV info
         GUI.Label(new Rect(10, 50, 200, 30), $"FOV: {fisheye_fov}° (Scroll to adjust)");
+        
+        // Show bounding box info if available
+        if (_HasBoundingBox)
+        {
+            GUI.Label(new Rect(10, 80, 300, 30), $"Bounding Box: {(_HasBoundingBox ? "Active" : "Inactive")}");
+        }
     }
-
-    // Quick Hull 3D implementation for convex hull calculation
-    private void ComputeConvexHull()
+    
+    #if UNITY_EDITOR
+    void OnDrawGizmos()
     {
-        if (points.Length == 0)
-            return;
-
-        // Convert float4 points to Vector3 array for convex hull calculation
-        Vector3[] vertices = new Vector3[points.Length];
-        for (int i = 0; i < points.Length; i++)
+        // Draw bounding box in the editor for visualization
+        if (_HasBoundingBox && Application.isEditor)
         {
-            vertices[i] = new Vector3(points[i].x, points[i].y, points[i].z);
-        }
-
-        // Compute the convex hull using QuickHull3D algorithm
-        HashSet<int> hullIndices = new HashSet<int>();
-        ComputeQuickHull3D(vertices, hullIndices);
-
-        // Create a texture to store which cells are on the convex hull
-        int texWidth = Mathf.CeilToInt(Mathf.Sqrt(points.Length));
-        int texHeight = Mathf.CeilToInt((float)points.Length / texWidth);
-        convex_hull_tex = new Texture2D(texWidth, texHeight, TextureFormat.RFloat, false);
-        convex_hull_tex.filterMode = FilterMode.Point;
-        convex_hull_tex.wrapMode = TextureWrapMode.Clamp;
-
-        // Initialize all cells as not on the convex hull
-        Color[] colors = new Color[texWidth * texHeight];
-        for (int i = 0; i < colors.Length; i++)
-        {
-            colors[i] = new Color(0, 0, 0, 0);
-        }
-
-        // Mark cells that are on the convex hull
-        foreach (int index in hullIndices)
-        {
-            if (index >= 0 && index < colors.Length)
-            {
-                colors[index] = new Color(1, 0, 0, 0); // r=1 means on hull
-            }
-        }
-
-        convex_hull_tex.SetPixels(colors);
-        convex_hull_tex.Apply();
-
-        // Pass to shader
-        blitMat.SetTexture("_convex_hull_tex", convex_hull_tex);
-        // Set the TexelSize property
-        blitMat.SetVector("_convex_hull_tex_TexelSize", 
-            new Vector4(1.0f/texWidth, 1.0f/texHeight, texWidth, texHeight));
+            Gizmos.color = new Color(0.5f, 1f, 0.5f, 0.3f);
+            Matrix4x4 oldMatrix = Gizmos.matrix;
             
-        // Initialize the unbounded cells toggle in the shader
-        blitMat.SetInt("_ShowUnboundedCells", showUnboundedCells ? 1 : 0);
-        
-        Debug.Log($"Convex hull computed with {hullIndices.Count} vertices on the hull out of {points.Length} total points");
-    }
-
-    // QuickHull 3D implementation
-    private void ComputeQuickHull3D(Vector3[] points, HashSet<int> hullIndices)
-    {
-        if (points.Length < 4)
-        {
-            // If we have less than 4 points, all points are on the hull
-            for (int i = 0; i < points.Length; i++)
-                hullIndices.Add(i);
-            return;
-        }
-
-        // Step 1: Find the initial tetrahedron
-        int[] extremePoints = FindExtremePoints(points);
-        
-        // Step 2: Initialize the convex hull with the tetrahedron
-        List<Triangle> faces = InitializeTetrahedron(points, extremePoints);
-        
-        // Mapping of points to their assigned faces for quick lookup
-        Dictionary<int, int> pointToFace = new Dictionary<int, int>();
-        
-        // Step 3: Assign each point to a face if it's outside
-        for (int i = 0; i < points.Length; i++)
-        {
-            if (Array.IndexOf(extremePoints, i) >= 0)
-                continue; // Skip the extreme points as they're already on the hull
-                
-            float maxDistance = 0;
-            int assignedFace = -1;
+            // Create a matrix that represents the bounding box transformation
+            Matrix4x4 boxMatrix = Matrix4x4.TRS(_BoundingBoxCenter, _BoundingBoxRotation, _BoundingBoxSize);
+            Gizmos.matrix = boxMatrix;
             
-            for (int f = 0; f < faces.Count; f++)
-            {
-                float distance = PointFaceDistance(points[i], faces[f], points);
-                if (distance > 0 && distance > maxDistance)
-                {
-                    maxDistance = distance;
-                    assignedFace = f;
-                }
-            }
+            // Draw a cube representing the bounding box (centered at origin with size 1)
+            Gizmos.DrawCube(Vector3.zero, Vector3.one);
             
-            if (assignedFace >= 0)
-            {
-                faces[assignedFace].outsidePoints.Add(i);
-                pointToFace[i] = assignedFace;
-            }
-        }
-        
-        // Step 4: Process each face
-        while (true)
-        {
-            int faceIndex = -1;
-            int furthestPoint = -1;
-            float maxDistance = 0;
+            // Draw wireframe
+            Gizmos.color = Color.green;
+            Gizmos.DrawWireCube(Vector3.zero, Vector3.one);
             
-            // Find the face with the furthest point
-            for (int f = 0; f < faces.Count; f++)
-            {
-                if (faces[f].outsidePoints.Count == 0)
-                    continue;
-                    
-                // Find furthest point for this face
-                foreach (int p in faces[f].outsidePoints)
-                {
-                    float distance = PointFaceDistance(points[p], faces[f], points);
-                    if (distance > maxDistance)
-                    {
-                        maxDistance = distance;
-                        furthestPoint = p;
-                        faceIndex = f;
-                    }
-                }
-            }
-            
-            if (faceIndex == -1)
-                break; // No more points outside
-                
-            // Add this point to the hull
-            hullIndices.Add(furthestPoint);
-            
-            // Find all faces visible from this point
-            List<int> visibleFaces = new List<int>();
-            for (int f = 0; f < faces.Count; f++)
-            {
-                if (PointFaceDistance(points[furthestPoint], faces[f], points) > 0)
-                    visibleFaces.Add(f);
-            }
-            
-            // Find horizon edges
-            List<Edge> horizon = new List<Edge>();
-            FindHorizonEdges(faces, visibleFaces, horizon);
-            
-            // Create new faces connecting the point to horizon edges
-            List<int> newFaces = new List<int>();
-            foreach (Edge edge in horizon)
-            {
-                Triangle newFace = new Triangle(
-                    edge.v1, edge.v2, furthestPoint,
-                    CalculateNormal(points[edge.v1], points[edge.v2], points[furthestPoint]));
-                faces.Add(newFace);
-                newFaces.Add(faces.Count - 1);
-            }
-            
-            // Reassign points from deleted faces to new faces
-            foreach (int f in visibleFaces)
-            {
-                foreach (int p in faces[f].outsidePoints)
-                {
-                    float maxDist = 0;
-                    int bestFace = -1;
-                    
-                    for (int nf = 0; nf < newFaces.Count; nf++)
-                    {
-                        float dist = PointFaceDistance(points[p], faces[newFaces[nf]], points);
-                        if (dist > 0 && dist > maxDist)
-                        {
-                            maxDist = dist;
-                            bestFace = newFaces[nf];
-                        }
-                    }
-                    
-                    if (bestFace >= 0)
-                    {
-                        faces[bestFace].outsidePoints.Add(p);
-                        pointToFace[p] = bestFace;
-                    }
-                }
-            }
-            
-            // Remove visible faces (in reverse order to avoid index issues)
-            visibleFaces.Sort((a, b) => b.CompareTo(a));
-            foreach (int f in visibleFaces)
-            {
-                faces.RemoveAt(f);
-            }
-        }
-        
-        // Add all vertices from the final faces to the hull
-        foreach (var face in faces)
-        {
-            hullIndices.Add(face.v1);
-            hullIndices.Add(face.v2);
-            hullIndices.Add(face.v3);
+            // Restore original matrix
+            Gizmos.matrix = oldMatrix;
         }
     }
-
-    // Helper method to find extreme points for the initial tetrahedron
-    private int[] FindExtremePoints(Vector3[] points)
-    {
-        int[] result = new int[4];
-        
-        // Find min/max points along each axis
-        int minX = 0, maxX = 0, minY = 0, maxY = 0, minZ = 0, maxZ = 0;
-        
-        for (int i = 1; i < points.Length; i++)
-        {
-            if (points[i].x < points[minX].x) minX = i;
-            if (points[i].x > points[maxX].x) maxX = i;
-            if (points[i].y < points[minY].y) minY = i;
-            if (points[i].y > points[maxY].y) maxY = i;
-            if (points[i].z < points[minZ].z) minZ = i;
-            if (points[i].z > points[maxZ].z) maxZ = i;
-        }
-        
-        // Find two most distant points for initial edge
-        int[] candidates = { minX, maxX, minY, maxY, minZ, maxZ };
-        float maxDist = 0;
-        int p1 = 0, p2 = 0;
-        
-        for (int i = 0; i < candidates.Length; i++)
-        {
-            for (int j = i + 1; j < candidates.Length; j++)
-            {
-                float dist = Vector3.Distance(points[candidates[i]], points[candidates[j]]);
-                if (dist > maxDist)
-                {
-                    maxDist = dist;
-                    p1 = candidates[i];
-                    p2 = candidates[j];
-                }
-            }
-        }
-        
-        result[0] = p1;
-        result[1] = p2;
-        
-        // Find point farthest from the line p1-p2
-        float maxLineDistance = 0;
-        int p3 = 0;
-        
-        for (int i = 0; i < points.Length; i++)
-        {
-            if (i == p1 || i == p2) continue;
-            
-            float dist = PointLineDistance(points[i], points[p1], points[p2]);
-            if (dist > maxLineDistance)
-            {
-                maxLineDistance = dist;
-                p3 = i;
-            }
-        }
-        
-        result[2] = p3;
-        
-        // Find point farthest from the plane p1-p2-p3
-        float maxPlaneDistance = 0;
-        int p4 = 0;
-        Vector3 normal = Vector3.Cross(
-            points[p2] - points[p1],
-            points[p3] - points[p1]
-        ).normalized;
-        
-        for (int i = 0; i < points.Length; i++)
-        {
-            if (i == p1 || i == p2 || i == p3) continue;
-            
-            float dist = Mathf.Abs(Vector3.Dot(points[i] - points[p1], normal));
-            if (dist > maxPlaneDistance)
-            {
-                maxPlaneDistance = dist;
-                p4 = i;
-            }
-        }
-        
-        result[3] = p4;
-        return result;
-    }
-
-    // Helper methods: These remain the same as previous implementation
-    private List<Triangle> InitializeTetrahedron(Vector3[] points, int[] extremePoints)
-    {
-        // Same as before
-        List<Triangle> faces = new List<Triangle>();
-        
-        // Calculate face normals pointing outward
-        Vector3 center = (points[extremePoints[0]] + points[extremePoints[1]] + 
-                         points[extremePoints[2]] + points[extremePoints[3]]) / 4;
-        
-        // Create faces ensuring consistent orientation
-        Triangle face1 = new Triangle(
-            extremePoints[0], extremePoints[1], extremePoints[2],
-            CalculateNormal(points[extremePoints[0]], points[extremePoints[1]], points[extremePoints[2]])
-        );
-        
-        Triangle face2 = new Triangle(
-            extremePoints[0], extremePoints[2], extremePoints[3],
-            CalculateNormal(points[extremePoints[0]], points[extremePoints[2]], points[extremePoints[3]])
-        );
-        
-        Triangle face3 = new Triangle(
-            extremePoints[0], extremePoints[3], extremePoints[1],
-            CalculateNormal(points[extremePoints[0]], points[extremePoints[3]], points[extremePoints[1]])
-        );
-        
-        Triangle face4 = new Triangle(
-            extremePoints[1], extremePoints[3], extremePoints[2],
-            CalculateNormal(points[extremePoints[1]], points[extremePoints[3]], points[extremePoints[2]])
-        );
-        
-        // Ensure all normals point outward
-        EnsureOutwardNormal(face1, center, points);
-        EnsureOutwardNormal(face2, center, points);
-        EnsureOutwardNormal(face3, center, points);
-        EnsureOutwardNormal(face4, center, points);
-        
-        faces.Add(face1);
-        faces.Add(face2);
-        faces.Add(face3);
-        faces.Add(face4);
-        
-        return faces;
-    }
-
-    private Vector3 CalculateNormal(Vector3 a, Vector3 b, Vector3 c)
-    {
-        return Vector3.Cross(b - a, c - a).normalized;
-    }
-
-    private void EnsureOutwardNormal(Triangle face, Vector3 center, Vector3[] points)
-    {
-        Vector3 faceCenter = (points[face.v1] + points[face.v2] + points[face.v3]) / 3;
-        Vector3 toCenter = center - faceCenter;
-        
-        if (Vector3.Dot(face.normal, toCenter) > 0)
-        {
-            // Normal points inward, flip it
-            face.normal = -face.normal;
-            int temp = face.v1;
-            face.v1 = face.v2;
-            face.v2 = temp;
-        }
-    }
-
-    private float PointFaceDistance(Vector3 point, Triangle face, Vector3[] vertices)
-    {
-        Vector3 v1 = vertices[face.v1];
-        return Vector3.Dot(point - v1, face.normal);
-    }
-
-    private float PointLineDistance(Vector3 point, Vector3 lineStart, Vector3 lineEnd)
-    {
-        Vector3 line = lineEnd - lineStart;
-        Vector3 pointVector = point - lineStart;
-        Vector3 projection = Vector3.Project(pointVector, line);
-        return Vector3.Distance(pointVector, projection);
-    }
-
-    private void FindHorizonEdges(List<Triangle> faces, List<int> visibleFaces, List<Edge> horizon)
-    {
-        // Same as before
-        List<Edge> allEdges = new List<Edge>();
-        foreach (int f in visibleFaces)
-        {
-            allEdges.Add(new Edge(faces[f].v1, faces[f].v2));
-            allEdges.Add(new Edge(faces[f].v2, faces[f].v3));
-            allEdges.Add(new Edge(faces[f].v3, faces[f].v1));
-        }
-        
-        for (int i = 0; i < allEdges.Count; i++)
-        {
-            bool isDuplicate = false;
-            for (int j = 0; j < allEdges.Count; j++)
-            {
-                if (i == j) continue;
-                if (allEdges[i].Equals(allEdges[j]))
-                {
-                    isDuplicate = true;
-                    break;
-                }
-            }
-            
-            if (!isDuplicate)
-                horizon.Add(allEdges[i]);
-        }
-    }
-
-    private class Triangle
-    {
-        public int v1, v2, v3;
-        public Vector3 normal;
-        public List<int> outsidePoints = new List<int>();
-        
-        public Triangle(int v1, int v2, int v3, Vector3 normal)
-        {
-            this.v1 = v1;
-            this.v2 = v2;
-            this.v3 = v3;
-            this.normal = normal;
-        }
-    }
-
-    private class Edge
-    {
-        public int v1, v2;
-        
-        public Edge(int v1, int v2)
-        {
-            if (v1 <= v2)
-            {
-                this.v1 = v1;
-                this.v2 = v2;
-            }
-            else
-            {
-                this.v1 = v2;
-                this.v2 = v1;
-            }
-        }
-        
-        public override bool Equals(object obj)
-        {
-            if (obj is Edge other)
-                return v1 == other.v1 && v2 == other.v2;
-            return false;
-        }
-        
-        public override int GetHashCode()
-        {
-            return v1.GetHashCode() ^ v2.GetHashCode();
-        }
-    }
+    #endif
 
     void OnRenderImage(RenderTexture srcRenderTex, RenderTexture outRenderTex)
     {
@@ -531,20 +217,39 @@ public class RadFoamWebGL : MonoBehaviour
             blitMat.SetMatrix("_InverseProjectionMatrix", camera.projectionMatrix.inverse);
             blitMat.SetFloat("_FisheyeFOV", fisheye_fov);
 
+            // Set bounding box TSR data if available
+            blitMat.SetInt("_HasBoundingBox", _HasBoundingBox ? 1 : 0);
+            
+            if (_HasBoundingBox)
+            {
+                // Set individual TSR components
+                blitMat.SetVector("_BoundingBoxCenter", _BoundingBoxCenter);
+                blitMat.SetVector("_BoundingBoxSize", _BoundingBoxSize);
+                
+                // Set rotation as a matrix for easier use in shader
+                Matrix4x4 rotationMatrix = Matrix4x4.Rotate(_BoundingBoxRotation);
+                blitMat.SetMatrix("_BoundingBoxRotation", rotationMatrix);
+                
+                // Combined TRS matrix and its inverse for ray intersection calculations
+                Matrix4x4 boundingBoxMatrix = Matrix4x4.TRS(_BoundingBoxCenter, _BoundingBoxRotation, Vector3.one);
+                Matrix4x4 invBoundingBoxMatrix = boundingBoxMatrix.inverse;
+                
+                blitMat.SetMatrix("_BoundingBoxTRS", boundingBoxMatrix);
+                blitMat.SetMatrix("_InvBoundingBoxTRS", invBoundingBoxMatrix);
+            }
+
             blitMat.SetTexture("_positions_tex", positions_tex);
             blitMat.SetTexture("_adjacency_tex", adjacency_tex);
             blitMat.SetTexture("_adjacency_diff_tex", adjacency_diff_tex);
             blitMat.SetTexture("_attr_tex", attr_tex);
-            blitMat.SetTexture("_convex_hull_tex", convex_hull_tex);
-            
-            // Update the show unbounded cells parameter
-            blitMat.SetInt("_ShowUnboundedCells", showUnboundedCells ? 1 : 0);
+
+            blitMat.SetInt("_NumCells", points.Length);
 
             Graphics.Blit(srcRenderTex, outRenderTex, blitMat);
         }
     }
 
-    // Existing job structs remain the same
+    // Job structs remain the same
     [BurstCompile]
     struct FillPointsDataJob : IJobParallelFor
     {

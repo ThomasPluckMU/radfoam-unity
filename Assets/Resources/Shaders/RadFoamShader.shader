@@ -3,6 +3,7 @@ Shader "Hidden/Custom/RadFoamShader"
     Properties
     {
         [HideInInspector] _MainTex ("Texture", 2D) = "white" {}
+        [Toggle] _ShowUnboundedCells ("Show Unbounded Cells", Int) = 0
     }
     SubShader
     {
@@ -41,6 +42,8 @@ Shader "Hidden/Custom/RadFoamShader"
                 float3 direction;
             };
 
+            int _NumCells;
+
             sampler2D _MainTex;
             float4 _MainTex_TexelSize;
 
@@ -57,13 +60,13 @@ Shader "Hidden/Custom/RadFoamShader"
             sampler2D _adjacency_tex;
             float4 _adjacency_tex_TexelSize;
 
-            // New texture to store which cells are on the convex hull (infinite cells)
-            sampler2D _convex_hull_tex;
-            float4 _convex_hull_tex_TexelSize;
-
+            // Bounding box parameters
             int _HasBoundingBox;
-            float4 _BoundingPlanes[6];
-
+            float3 _BoundingBoxCenter;
+            float3 _BoundingBoxSize;
+            float4x4 _BoundingBoxRotation;
+            float4x4 _BoundingBoxTRS;
+            float4x4 _InvBoundingBoxTRS;
 
             blit_v2f blitvert(blit_data v)
             {
@@ -93,6 +96,60 @@ Shader "Hidden/Custom/RadFoamShader"
                 return o;
             }
 
+            // Ray-box intersection test using slab method
+            bool RayBoxIntersection(Ray ray, out float t_enter, out float t_exit)
+            {
+                // Initialize output parameters
+                t_enter = 0;
+                t_exit = 10000;
+                
+                // Early out if no bounding box is defined
+                if (_HasBoundingBox == 0) {
+                    return true; // No bounding box, so the ray continues
+                }
+                
+                // Transform ray to local box space (where the box is a unit cube centered at origin)
+                float3 localOrigin = mul(_InvBoundingBoxTRS, float4(ray.origin, 1.0)).xyz;
+                float3 localDir = mul((float3x3)_InvBoundingBoxTRS, ray.direction);
+                
+                // Unit AABB bounds (box is centered at origin with size 1)
+                float3 boxMin = -_BoundingBoxSize*0.5;
+                float3 boxMax = _BoundingBoxSize*0.5;
+                
+                // Calculate intersection parameters for each axis
+                float3 t_min = (boxMin - localOrigin) / localDir;
+                float3 t_max = (boxMax - localOrigin) / localDir;
+                
+                // Ensure t_min <= t_max for each axis
+                float3 t_near = min(t_min, t_max);
+                float3 t_far = max(t_min, t_max);
+                
+                // Find the furthest near intersection and the closest far intersection
+                float t_n = max(max(t_near.x, t_near.y), t_near.z);
+                float t_f = min(min(t_far.x, t_far.y), t_far.z);
+                
+                // Check if there's a valid intersection
+                if (t_n > t_f || t_f < 0) {
+                    return false; // No intersection
+                }
+                
+                // Set output parameters
+
+                // After computing t_n and t_f in local space
+                float3 localEnterPoint = localOrigin + localDir * t_n;
+                float3 localExitPoint = localOrigin + localDir * t_f;
+
+                // Transform back to world space
+                float3 worldEnterPoint = mul(_BoundingBoxTRS, float4(localEnterPoint, 1.0)).xyz;
+                float3 worldExitPoint = mul(_BoundingBoxTRS, float4(localExitPoint, 1.0)).xyz;
+
+                // Compute world space t values
+                t_enter = length(worldEnterPoint - ray.origin) / length(ray.direction);
+                t_exit = length(worldExitPoint - ray.origin) / length(ray.direction);
+                
+                return true;
+            }
+
             float2 index_to_tex_buffer(uint i, float2 texel_size, uint width) {
                 uint y = i / width;
                 uint x = i % width;
@@ -115,13 +172,6 @@ Shader "Hidden/Custom/RadFoamShader"
                 return tex2Dlod(_adjacency_diff_tex, float4(index_to_tex_buffer(i, _adjacency_tex_TexelSize.xy, 4096), 0, 0)).xyz;
             }
 
-            // Function to check if a cell is on the convex hull (infinite cell)
-            bool is_on_convex_hull(uint cell_idx) {
-                // Read from the convex hull texture
-                float val = tex2Dlod(_convex_hull_tex, float4(index_to_tex_buffer(cell_idx, _convex_hull_tex_TexelSize.xy, 4096), 0, 0)).r;
-                return val > 0.5; // Using 0.5 as threshold for binary classification
-            }
-
             #define CHUNK_SIZE 8
 
             fixed4 frag (blit_v2f input) : SV_Target
@@ -133,39 +183,57 @@ Shader "Hidden/Custom/RadFoamShader"
                 }
                 ray.direction = normalize(ray.direction);
 
-                float scene_depth = 10000;
+                uint cell;
+
+                // Perform ray-box intersection test if bounding box is present
+                float box_t_enter, box_t_exit;
+                if (_HasBoundingBox) {
+                    
+                    bool intersects_box = RayBoxIntersection(ray, box_t_enter, box_t_exit);
+
+                    // Early termination if ray doesn't hit bounding box
+                    if (!intersects_box) {
+                        return src_color;
+                    } else if (intersects_box) {
+                        float3 entry_point = ray.origin + ray.direction * box_t_enter;
+                        
+                        // Find the closest cell to this entry point
+                        uint closest_cell = 0xFFFFFFFF;
+                        float min_dist = 10000.0;
+                        
+                        // This could be optimized, but for now, a linear search through cells
+                        for (uint c = 0; c < _NumCells; c++) {
+                            float3 cell_pos = positions_buff(c).xyz;
+                            float dist = length(entry_point - cell_pos);
+                            
+                            if (dist < min_dist) {
+                                min_dist = dist;
+                                closest_cell = c;
+                            }
+                        }
+                        
+                        // Use this as our starting cell instead of _start_index
+                        cell = (closest_cell != 0xFFFFFFFF) ? closest_cell : _start_index;
+                    }
+                } else {
+                    cell = _start_index;
+                }
+                
+                float scene_depth = _HasBoundingBox ? box_t_exit : 10000;
                 float3 diffs[CHUNK_SIZE];
 
-                // Early exit: If we have a bounding box, test ray intersection with it
-                if (_HasBoundingBox != 0)
-                {
-                    float t_enter, t_exit;
-                    bool intersects = RayBoxIntersection(ray, t_enter, t_exit);
-                    
-                    if (!intersects)
-                        return float4(1,0,0,1);
-                    
-                    float t_0 = t_enter;
-                    scene_depth = min(scene_depth, t_exit);
-                    ray.origin = ray.origin + ray.direction * t_enter;
-                }
-
                 // tracing state
-                uint cell = _start_index;
                 float transmittance = 1.0f;
                 float3 color = float3(0, 0, 0);
-                float t_0 = 0.0;
-
+                float t_0 = _HasBoundingBox ? max(0,box_t_enter) : 0.0; // Start at box entry point if applicable
+                float progress = 0;
                 int i = 0;
-                for (; i < 1000 && transmittance > 0.01; i++) {
+                for (; i < 1000 && transmittance > 0.1; i++) {
                     float4 cell_data = positions_buff(cell);
                     uint adj_from = cell > 0 ? asuint(positions_buff(cell - 1).w) : 0;
                     uint adj_to = asuint(cell_data.w);
 
                     float4 attrs = attrs_buff(cell);
-
-                    // Use precomputed convex hull information
-                    bool is_infinite = is_on_convex_hull(cell);
 
                     float t_1 = scene_depth;
                     uint next_face = 0xFFFFFFFF; 
@@ -189,24 +257,21 @@ Shader "Hidden/Custom/RadFoamShader"
                             next_face = valid ? adj_from + f + a2 : next_face;
                         }
                     }
-
-                    // If this is an infinite cell, set density to 0 to make it transparent
-                    float density = is_infinite ? 0.0 : attrs.w;
+                    float density = attrs.w;
                     float alpha = 1.0 - exp(-density * (t_1 - t_0));
                     float weight = transmittance * alpha;
                     cell = adjacency_buffer(next_face);
                     t_0 = t_1;
-
+                    
                     float3 rgb = pow(attrs.rgb, 2.2);
                     color += rgb * weight;
-
+                    
                     transmittance = transmittance * (1.0 - alpha);
-
-                    if (next_face == 0xFFFFFFFF || t_1 >= scene_depth) {
+                    
+                    if (t_1 >= scene_depth || next_face == 0xFFFFFFFF) {
                         break;
                     }
                 }
-
                 return float4(lerp(color, src_color.xyz, transmittance), 1);
             }
             ENDCG

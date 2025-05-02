@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using Ply;
 using Unity.Burst;
@@ -10,12 +9,14 @@ using UnityEngine.Rendering;
 
 public class RadFoamCompute : MonoBehaviour
 {
+
+
     public Transform Target;
     public PlyData[] DataList;
 
     public ComputeShader radfoamShader;
     public ComputeShader closestShader;
-    public ComputeShader pbdShader;
+
 
     // model data
     private GraphicsBuffer positions_buffer;
@@ -26,19 +27,6 @@ public class RadFoamCompute : MonoBehaviour
     private GraphicsBuffer closest_index_buffer;
     private GraphicsBuffer tmp_distance_buffer;
 
-    // PBD buffers
-    private GraphicsBuffer velocities_buffer;
-    private GraphicsBuffer inv_masses_buffer;
-    private GraphicsBuffer predicted_positions_buffer;
-    private GraphicsBuffer constraint_stiffness_buffer;
-    
-    // Bounding box data
-    private bool _hasBoundingBox = false;
-    private Vector3 _boundingBoxCenter = Vector3.zero;
-    private Vector3 _boundingBoxSize = Vector3.zero;
-    private Quaternion _boundingBoxRotation = Quaternion.identity;
-    private Vector4[] _BoundingPlanes = new Vector4[6];
-
     // viewer state 
     private int debug_view = 0;
     private int camera_model = 0;
@@ -47,7 +35,7 @@ public class RadFoamCompute : MonoBehaviour
     private int current_sh_level = -1;
     private bool current_morton_reorder = true;
     private int test_algo = 0;
-    private bool enable_pbd = true;
+
 
     private const int SH_DEGREE_MAX = 3;
     private int SH_DIM(int degree) => (degree + 1) * (degree + 1);
@@ -62,11 +50,6 @@ public class RadFoamCompute : MonoBehaviour
 
         closest_index_buffer?.Release();
         tmp_distance_buffer?.Release();
-        
-        velocities_buffer?.Release();
-        inv_masses_buffer?.Release();
-        predicted_positions_buffer?.Release();
-        constraint_stiffness_buffer?.Release();
     }
 
     void OnGUI()
@@ -76,292 +59,10 @@ public class RadFoamCompute : MonoBehaviour
         GUILayout.Label("Morton reorder (R): " + current_morton_reorder);
         GUILayout.Label("Debug view (D): " + debug_view);
         GUILayout.Label("Camera Model (C): " + camera_model);
-        GUILayout.Label("PBD Enabled (P): " + enable_pbd);
-        
-        if (_hasBoundingBox)
-        {
-            GUILayout.Label("Bounding Box: Active");
-            GUILayout.Label($"  Center: {_boundingBoxCenter}");
-            GUILayout.Label($"  Size: {_boundingBoxSize}");
-            GUILayout.Label($"  Rotation: {_boundingBoxRotation.eulerAngles}");
-        }
-        else
-        {
-            GUILayout.Label("Bounding Box: Not Active");
-        }
-    }
-
-    private bool ParseBoundingBoxFromPly(Model model)
-    {
-        try
-        {
-            // First check if the model has bounding box data directly from the PLY file
-            if (model.HasBoundingBox)
-            {
-                _boundingBoxCenter = model.BoundingBoxCenter;
-                _boundingBoxSize = model.BoundingBoxSize;
-                _boundingBoxRotation = model.BoundingBoxRotation;
-
-                // Calculate the 6 bounding planes from center, size, and rotation
-                Vector3[] directions = {
-                    Vector3.right, Vector3.left,    // X-axis planes
-                    Vector3.up, Vector3.down,       // Y-axis planes
-                    Vector3.forward, Vector3.back   // Z-axis planes
-                };
-                
-                // Create transformation matrices
-                Vector4[] _BoundingPlanes = new Vector4[6];
-                for (int i = 0; i < 6; i++) {
-                    // Transform the direction by rotation
-                    Vector3 normal = _boundingBoxRotation * directions[i];
-                    
-                    // Calculate the plane distance (half-size in that direction + center projection)
-                    float halfSize = _boundingBoxSize[i/2] * 0.5f;
-                    float distance = Vector3.Dot(normal, _boundingBoxCenter) + (i % 2 == 0 ? halfSize : -halfSize);
-                    
-                    // Store as (normal.xyz, distance)
-                    _BoundingPlanes[i] = new Vector4(normal.x, normal.y, normal.z, distance);
-                }
-                
-                _hasBoundingBox = true;
-                Debug.Log($"Loaded bounding box from PLY metadata: Center={_boundingBoxCenter}, Size={_boundingBoxSize}, Rotation={_boundingBoxRotation.eulerAngles}");
-                return true;
-            }
-            
-            // If not directly available, try to find bounding_box element
-            try
-            {
-                ElementView boundingBoxView;
-                boundingBoxView = model.element_view("bounding_box");
-                if (boundingBoxView.count > 0)
-                {
-                    PropertyView centerXView = boundingBoxView.property_view("center_x");
-                    PropertyView centerYView = boundingBoxView.property_view("center_y");
-                    PropertyView centerZView = boundingBoxView.property_view("center_z");
-                    
-                    PropertyView sizeXView = boundingBoxView.property_view("size_x");
-                    PropertyView sizeYView = boundingBoxView.property_view("size_y");
-                    PropertyView sizeZView = boundingBoxView.property_view("size_z");
-                    
-                    PropertyView rotXView = boundingBoxView.property_view("rotation_x");
-                    PropertyView rotYView = boundingBoxView.property_view("rotation_y");
-                    PropertyView rotZView = boundingBoxView.property_view("rotation_z");
-                    PropertyView rotWView = boundingBoxView.property_view("rotation_w");
-                    
-                    _boundingBoxCenter = new Vector3(
-                        centerXView.Get<float>(0),
-                        centerYView.Get<float>(0),
-                        centerZView.Get<float>(0)
-                    );
-                    
-                    _boundingBoxSize = new Vector3(
-                        sizeXView.Get<float>(0),
-                        sizeYView.Get<float>(0),
-                        sizeZView.Get<float>(0)
-                    );
-                    
-                    _boundingBoxRotation = new Quaternion(
-                        rotXView.Get<float>(0),
-                        rotYView.Get<float>(0),
-                        rotZView.Get<float>(0),
-                        rotWView.Get<float>(0)
-                    );
-
-                    // Calculate the 6 bounding planes from center, size, and rotation
-                    Vector3[] directions = {
-                        Vector3.right, Vector3.left,    // X-axis planes
-                        Vector3.up, Vector3.down,       // Y-axis planes
-                        Vector3.forward, Vector3.back   // Z-axis planes
-                    };
-
-                    
-                    // Create transformation matrices
-                    Vector4[] _BoundingPlanes = new Vector4[6];
-                    for (int i = 0; i < 6; i++) {
-                        // Transform the direction by rotation
-                        Vector3 normal = _boundingBoxRotation * directions[i];
-                        
-                        // Calculate the plane distance (half-size in that direction + center projection)
-                        float halfSize = _boundingBoxSize[i/2] * 0.5f;
-                        float distance = Vector3.Dot(normal, _boundingBoxCenter) + (i % 2 == 0 ? halfSize : -halfSize);
-                        
-                        // Store as (normal.xyz, distance)
-                        _BoundingPlanes[i] = new Vector4(normal.x, normal.y, normal.z, distance);
-                    }
-                    
-                    _hasBoundingBox = true;
-                    Debug.Log($"Loaded bounding box from element: Center={_boundingBoxCenter}, Size={_boundingBoxSize}, Rotation={_boundingBoxRotation.eulerAngles}");
-                    return true;
-                }
-            }
-            catch (ArgumentException)
-            {
-                Debug.Log("No bounding_box element found in PLY data");
-            }
-            
-            // No bounding box found
-            _hasBoundingBox = false;
-            return false;
-        }
-        catch (Exception e)
-        {
-            Debug.LogWarning($"Failed to parse bounding box data: {e.Message}");
-            _hasBoundingBox = false;
-            return false;
-        }
-    }
-
-    private void LoadBoundingBox(Model model)
-    {
-        try
-        {
-            // First check if model has a bounding_box element
-            try
-            {
-                ElementView boundingBoxView = model.element_view("bounding_box");
-                if (boundingBoxView.count > 0)
-                {
-                    // Read bounding box data from the element
-                    _boundingBoxCenter = new Vector3(
-                        boundingBoxView.property_view("center_x").Get<float>(0),
-                        boundingBoxView.property_view("center_y").Get<float>(0),
-                        boundingBoxView.property_view("center_z").Get<float>(0)
-                    );
-                    
-                    _boundingBoxSize = new Vector3(
-                        boundingBoxView.property_view("size_x").Get<float>(0),
-                        boundingBoxView.property_view("size_y").Get<float>(0),
-                        boundingBoxView.property_view("size_z").Get<float>(0)
-                    );
-                    
-                    _boundingBoxRotation = new Quaternion(
-                        boundingBoxView.property_view("rotation_x").Get<float>(0),
-                        boundingBoxView.property_view("rotation_y").Get<float>(0),
-                        boundingBoxView.property_view("rotation_z").Get<float>(0),
-                        boundingBoxView.property_view("rotation_w").Get<float>(0)
-                    );
-                    
-                    _hasBoundingBox = true;
-                    Debug.Log($"Loaded bounding box from element: Center={_boundingBoxCenter}, Size={_boundingBoxSize}, Rotation={_boundingBoxRotation.eulerAngles}");
-                    return;
-                }
-            }
-            catch (ArgumentException)
-            {
-                // No bounding_box element, continue to other methods
-            }
-            
-            // Fallback to default bounding box if needed
-            _hasBoundingBox = false;
-            Debug.Log("No bounding box found in model");
-        }
-        catch (Exception e)
-        {
-            _hasBoundingBox = false;
-            Debug.LogWarning($"Failed to load bounding box: {e.Message}");
-        }
-    }
-
-    private bool ParseBoundingBoxFromComments(string headerText)
-    {
-        try
-        {
-            // Extract bounding box info from PLY comments
-            string[] lines = headerText.Split('\n');
-            string centerLine = null;
-            string sizeLine = null;
-            string rotationLine = null;
-            
-            foreach (string line in lines)
-            {
-                string trimmedLine = line.Trim();
-                if (trimmedLine.StartsWith("comment boundingbox_center"))
-                {
-                    centerLine = trimmedLine.Substring("comment boundingbox_center".Length).Trim();
-                }
-                else if (trimmedLine.StartsWith("comment boundingbox_size"))
-                {
-                    sizeLine = trimmedLine.Substring("comment boundingbox_size".Length).Trim();
-                }
-                else if (trimmedLine.StartsWith("comment boundingbox_rotation"))
-                {
-                    rotationLine = trimmedLine.Substring("comment boundingbox_rotation".Length).Trim();
-                }
-            }
-            
-            if (centerLine != null && sizeLine != null && rotationLine != null)
-            {
-                string[] centerParts = centerLine.Split(' ');
-                string[] sizeParts = sizeLine.Split(' ');
-                string[] rotationParts = rotationLine.Split(' ');
-                
-                if (centerParts.Length >= 3 && sizeParts.Length >= 3 && rotationParts.Length >= 4)
-                {
-                    _boundingBoxCenter = new Vector3(
-                        float.Parse(centerParts[0]),
-                        float.Parse(centerParts[1]),
-                        float.Parse(centerParts[2])
-                    );
-                    
-                    _boundingBoxSize = new Vector3(
-                        float.Parse(sizeParts[0]),
-                        float.Parse(sizeParts[1]),
-                        float.Parse(sizeParts[2])
-                    );
-                    
-                    _boundingBoxRotation = new Quaternion(
-                        float.Parse(rotationParts[0]),
-                        float.Parse(rotationParts[1]),
-                        float.Parse(rotationParts[2]),
-                        float.Parse(rotationParts[3])
-                    );
-
-                    // Calculate the 6 bounding planes from center, size, and rotation
-                    Vector3[] directions = {
-                        Vector3.right, Vector3.left,    // X-axis planes
-                        Vector3.up, Vector3.down,       // Y-axis planes
-                        Vector3.forward, Vector3.back   // Z-axis planes
-                    };
-                    
-                    // Create transformation matrices
-                    Vector4[] _BoundingPlanes = new Vector4[6];
-                    for (int i = 0; i < 6; i++) {
-                        // Transform the direction by rotation
-                        Vector3 normal = _boundingBoxRotation * directions[i];
-                        
-                        // Calculate the plane distance (half-size in that direction + center projection)
-                        float halfSize = _boundingBoxSize[i/2] * 0.5f;
-                        float distance = Vector3.Dot(normal, _boundingBoxCenter) + (i % 2 == 0 ? halfSize : -halfSize);
-                        
-                        // Store as (normal.xyz, distance)
-                        _BoundingPlanes[i] = new Vector4(normal.x, normal.y, normal.z, distance);
-                    }
-                    
-                    _hasBoundingBox = true;
-                    Debug.Log($"Loaded bounding box from comments: Center={_boundingBoxCenter}, Size={_boundingBoxSize}, Rotation={_boundingBoxRotation.eulerAngles}");
-                    return true;
-                }
-            }
-            
-            _hasBoundingBox = false;
-            return false;
-        }
-        catch (Exception e)
-        {
-            Debug.LogWarning($"Failed to parse bounding box from comments: {e.Message}");
-            _hasBoundingBox = false;
-            return false;
-        }
     }
 
     void Load(in Model model, int sh_degree, bool morton_reorder)
     {
-        // Try to parse bounding box data
-        _hasBoundingBox = ParseBoundingBoxFromPly(model);
-        if (_hasBoundingBox){
-            LoadBoundingBox(model);
-        }
-        
         for (int i = 1; i <= SH_DEGREE_MAX; i++) {
             var kw_compute = new LocalKeyword(radfoamShader, "SH_DEGREE_" + i);
             if (i == sh_degree) {
@@ -483,6 +184,23 @@ public class RadFoamCompute : MonoBehaviour
             adjacency_buffer.SetData(adjacency);
         }
 
+        // {    // some diagnostics
+        //     uint min = 10000, max = 0, total = 0;
+        //     uint offset_from = 0;
+        //     for (int i = 1; i < vertex_count; i++) {
+        //         var offset_to = math.asuint(points[i].w);
+        //         var count = offset_to - offset_from;
+        //         if (count > 30) {
+        //             total++;
+        //             expensive.Add(i);
+        //         }
+        //         min = math.min(min, count);
+        //         max = math.max(max, count);
+        //         offset_from = offset_to;
+        //     }
+        //     Debug.Log("Min " + min + "; Max " + max + "; Above thr " + total);
+        // }
+
         {
             var reduction_group_count = Mathf.CeilToInt(vertex_count / (float)FIND_CLOSEST_THREADS_PER_GROUP);
             closest_index_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, reduction_group_count, sizeof(uint));
@@ -491,25 +209,7 @@ public class RadFoamCompute : MonoBehaviour
 
         // calculate direction vectors between adjacent cells
         {
-            adjacency_diff_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, adjacency_count, 4 * 4);
-
-            // Initialize PBD buffers
-            velocities_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertex_count, 12);
-            inv_masses_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertex_count, 4);
-            predicted_positions_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, vertex_count, 12);
-            constraint_stiffness_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, adjacency_count, 4);
-
-            // Initialize velocities to zero and masses to 1
-            var init_velocities = new NativeArray<float3>(vertex_count, Allocator.Temp);
-            var init_masses = new NativeArray<float>(vertex_count, Allocator.Temp);
-            for (int i = 0; i < vertex_count; i++) {
-                init_masses[i] = 1.0f;
-            }
-            velocities_buffer.SetData(init_velocities);
-            inv_masses_buffer.SetData(init_masses);
-            init_velocities.Dispose();
-            init_masses.Dispose();
-            
+            adjacency_diff_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, adjacency_count, 4 * 4); // 4*2 should be enough, but somehow it isnt
             var kernel = radfoamShader.FindKernel("BuildAdjDiff");
             radfoamShader.SetInt("_Count", vertex_count);
             radfoamShader.SetBuffer(kernel, "_start_index", closest_index_buffer);
@@ -518,43 +218,23 @@ public class RadFoamCompute : MonoBehaviour
             radfoamShader.SetBuffer(kernel, "_adjacency_diff_uav", adjacency_diff_buffer);
             radfoamShader.Dispatch(kernel, Mathf.CeilToInt(vertex_count / 1024f), 1, 1);
         }
+
+        // {
+        //     using var adj_diff = new NativeArray<float4>(adjacency_count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        //     new BuildAdjDiff { positions = points, adjacency = adjacency, adjacency_diff = adj_diff }.Schedule(vertex_count, 512).Complete();
+        //     adjacency_diff_buffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, adjacency_count, 4 * 4); // 4*2 should be enough, but somehow it isnt
+        //     adjacency_diff_buffer.SetData(adj_diff);
+        // }
     }
 
     void Update()
     {
-        // PBD prediction step
-        if (enable_pbd && positions_buffer != null && velocities_buffer != null) {
-            var kernel = pbdShader.FindKernel("PredictPositions");
-            pbdShader.SetBuffer(kernel, "_positions", positions_buffer);
-            pbdShader.SetBuffer(kernel, "_velocities", velocities_buffer);
-            pbdShader.SetBuffer(kernel, "_predicted_positions", predicted_positions_buffer);
-            pbdShader.SetBuffer(kernel, "_inv_masses", inv_masses_buffer);
-            pbdShader.SetFloat("_deltaTime", Time.deltaTime);
-            pbdShader.Dispatch(kernel, Mathf.CeilToInt(positions_buffer.count / 64f), 1, 1);
-
-            // Solve constraints (3 iterations)
-            for (int i = 0; i < 3; i++) {
-                kernel = pbdShader.FindKernel("SolveDistanceConstraints");
-                pbdShader.SetBuffer(kernel, "_predicted_positions", predicted_positions_buffer);
-                pbdShader.SetBuffer(kernel, "_adjacency", adjacency_buffer);
-                pbdShader.SetBuffer(kernel, "_constraint_stiffness", constraint_stiffness_buffer);
-                pbdShader.Dispatch(kernel, Mathf.CeilToInt(adjacency_buffer.count / 64f), 1, 1);
-            }
-
-            // Update velocities and positions
-            kernel = pbdShader.FindKernel("UpdateVelocities");
-            pbdShader.SetBuffer(kernel, "_positions", positions_buffer);
-            pbdShader.SetBuffer(kernel, "_predicted_positions", predicted_positions_buffer);
-            pbdShader.SetBuffer(kernel, "_velocities", velocities_buffer);
-            pbdShader.SetFloat("_deltaTime", Time.deltaTime);
-            pbdShader.Dispatch(kernel, Mathf.CeilToInt(positions_buffer.count / 64f), 1, 1);
-        }
-
         if (Input.GetKeyDown(KeyCode.C)) {
             camera_model = camera_model == 0 ? 1 : 0;
         }
         fisheye_fov = math.clamp(fisheye_fov + Input.mouseScrollDelta.y * -4, 10, 120);
         debug_view = Input.GetKey(KeyCode.D) ? 1 : 0;
+
 
         var model_index = math.clamp(current_model + (Input.GetKeyDown(KeyCode.RightArrow) ? 1 : 0) + (Input.GetKeyDown(KeyCode.LeftArrow) ? -1 : 0), 0, DataList.Length);
         var sh_level = math.clamp(current_sh_level + (Input.GetKeyDown(KeyCode.UpArrow) ? 1 : 0) + (Input.GetKeyDown(KeyCode.DownArrow) ? -1 : 0), 0, SH_DEGREE_MAX);
@@ -572,7 +252,41 @@ public class RadFoamCompute : MonoBehaviour
         }
 
         test_algo = Input.GetKey(KeyCode.A) ? 1 : 0;
-        enable_pbd = Input.GetKeyDown(KeyCode.P) ? !enable_pbd : enable_pbd;
+
+        // if (Input.GetKeyDown(KeyCode.Return)) {
+        //     OnDestroy();
+        //     using (var model = Model.from_file("C:/Users/Chris/Downloads/scene(3).ply")) {
+        //         Load(model, 3);
+        //     }
+        // }
+
+        // Debugging the voronoi graph
+        // var world_to_model = Target.worldToLocalMatrix * Matrix4x4.Scale(new Vector3(1, -1, 1));
+        // using (var model = Data.Load()) {
+        //     var vertex_element = model.element_view("vertex");
+        //     var adjacency_element = model.element_view("adjacency");
+        //     var x = vertex_element.property_view("x");
+        //     var y = vertex_element.property_view("y");
+        //     var z = vertex_element.property_view("z");
+        //     var o = vertex_element.property_view("adjacency_offset");
+        //     var a = adjacency_element.property_view("adjacency");
+        //     Vector3 pos(int i)
+        //     {
+        //         return world_to_model.MultiplyPoint(new Vector3(x.Get<float>(i), y.Get<float>(i), z.Get<float>(i)));
+        //     }
+        //     for (var l = 0; l < expensive.Count; l++) {
+        //         var n = expensive[l];
+        //         var zero = pos(n);
+        //         var from = n > 0 ? o.Get<uint>(n - 1) : 0;
+        //         var to = o.Get<uint>(n);
+        //         for (var i = from; i < to; i++) {
+        //             var other = a.Get<uint>((int)i);
+        //             // Debug.Log(other);
+        //             Debug.DrawLine(zero, pos((int)other));
+        //         }
+        //     }
+
+        // }
     }
 
     void OnRenderImage(RenderTexture srcRenderTex, RenderTexture outRenderTex)
@@ -600,18 +314,19 @@ public class RadFoamCompute : MonoBehaviour
             closestShader.SetBuffer(kernel, "_Distance", tmp_distance_buffer);
             closestShader.SetInt("_Count", closest_index_buffer.count);
 
-            radfoamShader.SetInt("_HasBoundingBox", _hasBoundingBox ? 1 : 0);
-            if (_hasBoundingBox)
-            {
-                int planesPropID = Shader.PropertyToID("_BoundingPlanes");
-                radfoamShader.SetVectorArray(planesPropID, _BoundingPlanes);
-            }
-
             while (count > 1) {
                 count = Mathf.CeilToInt(count / (float)FIND_CLOSEST_THREADS_PER_GROUP);
                 closestShader.Dispatch(kernel, count, 1, 1);
             }
         }
+
+        // find closest BURST
+        // {
+        //     var local_camera_pos = world_to_model.MultiplyPoint3x4(camera.transform.position);
+        //     using var closest = new NativeArray<uint>(1, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        //     new FindClosest() { target = local_camera_pos, positions = points, closest = closest }.Schedule().Complete();
+        //     blitMat.SetInt("_start_index", (int)closest[0]);
+        // }
 
         // draw
         {
@@ -623,20 +338,13 @@ public class RadFoamCompute : MonoBehaviour
             var kernel = radfoamShader.FindKernel("RadFoam");
             radfoamShader.SetTexture(kernel, "_srcTex", srcRenderTex);
             radfoamShader.SetTexture(kernel, "_outTex", tmp);
+            // radfoamShader.SetTextureFromGlobal(kernel, "_CameraDepth", "_CameraDepthTexture");
             radfoamShader.SetMatrix("_Camera2WorldMatrix", world_to_model * camera.cameraToWorldMatrix);
             radfoamShader.SetMatrix("_InverseProjectionMatrix", camera.projectionMatrix.inverse);
             radfoamShader.SetFloat("_CameraModel", camera_model);
             radfoamShader.SetFloat("_FisheyeFOV", fisheye_fov);
             radfoamShader.SetInt("_DebugView", debug_view);
             radfoamShader.SetInt("_TestAlgo", test_algo);
-            
-            // Set bounding box data if available
-            radfoamShader.SetInt("_HasBoundingBox", _hasBoundingBox ? 1 : 0);
-            if (_hasBoundingBox)
-            {
-                int planesPropID = Shader.PropertyToID("_BoundingPlanes");
-                radfoamShader.SetVectorArray(planesPropID, _BoundingPlanes);
-            }
 
             radfoamShader.SetBuffer(kernel, "_start_index", closest_index_buffer);
             radfoamShader.SetBuffer(kernel, "_positions", positions_buffer);
@@ -729,24 +437,21 @@ public class RadFoamCompute : MonoBehaviour
         public void Execute()
         {
             var adj_index = 0;
-            for (var p = 0; p < points.Length; p++)
-            {
+            for (var p = 0; p < points.Length; p++) {
                 var old_index = (int)mapping[p].index;
                 var old_point = points[old_index];
 
                 var old_adj_from = old_index > 0 ? math.asuint(points[old_index - 1].w) : 0;
                 var old_adj_to = math.asuint(old_point.w);
 
-                for (var adj = old_adj_from; adj < old_adj_to; adj++)
-                {
+                for (var adj = old_adj_from; adj < old_adj_to; adj++) {
                     shuffled_adjacency[adj_index++] = mapping_inv[(int)adjacency[(int)adj]];
                 }
 
                 shuffled_points[p] = new float4(old_point.xyz, math.asfloat((uint)adj_index));  // update the adjacency offset to the shuffled version
                 // shuffled_attributes.Slice()
                 // NativeSlice.Copy() ?
-                for (var a = 0; a < attribute_elem_size; a++)
-                {
+                for (var a = 0; a < attribute_elem_size; a++) {
                     shuffled_attributes[p * attribute_elem_size + a] = attributes[old_index * attribute_elem_size + a];
                 }
             }
