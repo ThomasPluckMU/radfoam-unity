@@ -234,6 +234,7 @@ namespace Ply
                 boundingBoxCenter = boundingBoxHandle.transform.position;
                 boundingBoxRotation = boundingBoxHandle.transform.rotation;
                 boundingBoxSize = boundingBoxHandle.transform.localScale;
+                UpdateBoundingBox();
                 isDirty = true;
                 UnityEditor.EditorUtility.SetDirty(this);
             }
@@ -352,11 +353,22 @@ namespace Ply
         {
             if (useBoundingBoxFilter)
             {
-                Gizmos.color = new Color(0.2f, 0.8f, 0.2f, 0.3f);
-                Gizmos.DrawCube(boundingBoxCenter, boundingBoxSize);
+                // Store the original matrix
+                Matrix4x4 originalMatrix = Gizmos.matrix;
                 
+                // Set the Gizmos matrix using the bounding box parameters
+                Gizmos.matrix = Matrix4x4.TRS(boundingBoxCenter, boundingBoxRotation, Vector3.one);
+                
+                // Draw the solid cube with semi-transparent color
+                Gizmos.color = new Color(0.2f, 0.8f, 0.2f, 0.3f);
+                Gizmos.DrawCube(Vector3.zero, boundingBoxSize);
+                
+                // Draw the wireframe cube with solid color
                 Gizmos.color = new Color(0.2f, 0.8f, 0.2f, 1.0f);
-                Gizmos.DrawWireCube(boundingBoxCenter, boundingBoxSize);
+                Gizmos.DrawWireCube(Vector3.zero, boundingBoxSize);
+
+                // Rotate back
+                Gizmos.matrix = originalMatrix;
             }
         }
 

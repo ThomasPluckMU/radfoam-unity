@@ -4,32 +4,42 @@ using Unity.Collections;
 using Unity.Jobs;
 using Unity.Mathematics;
 using UnityEngine;
+using System.Collections.Generic;
+using System;
 
 public class RadFoamWebGL : MonoBehaviour
 {
     public PlyData Data;
     public float fisheye_fov = 60;
     public Transform Target;
+    
+    [Tooltip("Toggle to show or hide infinite cells")]
+    public bool showUnboundedCells = false; // Toggle for infinite cells
 
     private Material blitMat;
     private Texture2D positions_tex;
     private Texture2D attr_tex;
     private Texture2D adjacency_tex;
     private Texture2D adjacency_diff_tex;
+    private Texture2D convex_hull_tex; // Texture to identify cells on the convex hull
 
     private NativeArray<float4> points; // store this for finding the closest cell to the camera on the CPU
 
-    // Bounding box data
-    private bool _hasBoundingBox = false;
-    private Vector3 _boundingBoxCenter = Vector3.zero;
-    private Vector3 _boundingBoxSize = Vector3.zero;
-    private Quaternion _boundingBoxRotation = Quaternion.identity;
-    private Vector4[] _boundingPlanes = new Vector4[6];
+    // GUI toggle settings
+    private Rect toggleButtonRect;
+    private GUIStyle buttonStyle;
 
     void Start()
     {
         blitMat = new Material(Shader.Find("Hidden/Custom/RadFoamShader"));
         Load();
+        ComputeConvexHull(); // Compute convex hull after loading data
+        
+        // Setup GUI elements
+        toggleButtonRect = new Rect(10, 10, 150, 30);
+        buttonStyle = new GUIStyle(GUI.skin.button);
+        buttonStyle.fontSize = 14;
+        buttonStyle.normal.textColor = Color.white;
     }
 
     void OnDestroy()
@@ -39,275 +49,463 @@ public class RadFoamWebGL : MonoBehaviour
         Destroy(blitMat);
     }
 
-    private bool ParseBoundingBoxFromPly(Model model)
-    {
-        try
-        {
-            // Check if the model has bounding box data 
-            if (model.HasBoundingBox)
-            {
-                _boundingBoxCenter = model.BoundingBoxCenter;
-                _boundingBoxSize = model.BoundingBoxSize;
-                _boundingBoxRotation = model.BoundingBoxRotation;
-                
-                // Calculate the 6 bounding planes from center, size, and rotation
-                CalculateBoundingPlanes();
-                
-                _hasBoundingBox = true;
-                Debug.Log($"Loaded bounding box from PLY: Center={_boundingBoxCenter}, Size={_boundingBoxSize}, Rotation={_boundingBoxRotation.eulerAngles}");
-                return true;
-            }
-            
-            // Try to find bounding_box element
-            try
-            {
-                ElementView boundingBoxView = model.element_view("bounding_box");
-                if (boundingBoxView.count > 0)
-                {
-                    PropertyView centerXView = boundingBoxView.property_view("center_x");
-                    PropertyView centerYView = boundingBoxView.property_view("center_y");
-                    PropertyView centerZView = boundingBoxView.property_view("center_z");
-                    
-                    PropertyView sizeXView = boundingBoxView.property_view("size_x");
-                    PropertyView sizeYView = boundingBoxView.property_view("size_y");
-                    PropertyView sizeZView = boundingBoxView.property_view("size_z");
-                    
-                    PropertyView rotXView = boundingBoxView.property_view("rotation_x");
-                    PropertyView rotYView = boundingBoxView.property_view("rotation_y");
-                    PropertyView rotZView = boundingBoxView.property_view("rotation_z");
-                    PropertyView rotWView = boundingBoxView.property_view("rotation_w");
-                    
-                    _boundingBoxCenter = new Vector3(
-                        centerXView.Get<float>(0),
-                        centerYView.Get<float>(0),
-                        centerZView.Get<float>(0)
-                    );
-                    
-                    _boundingBoxSize = new Vector3(
-                        sizeXView.Get<float>(0),
-                        sizeYView.Get<float>(0),
-                        sizeZView.Get<float>(0)
-                    );
-                    
-                    _boundingBoxRotation = new Quaternion(
-                        rotXView.Get<float>(0),
-                        rotYView.Get<float>(0),
-                        rotZView.Get<float>(0),
-                        rotWView.Get<float>(0)
-                    );
-
-                    // Calculate the bounding planes
-                    CalculateBoundingPlanes();
-                    
-                    _hasBoundingBox = true;
-                    Debug.Log($"Loaded bounding box from element: Center={_boundingBoxCenter}, Size={_boundingBoxSize}, Rotation={_boundingBoxRotation.eulerAngles}");
-                    return true;
-                }
-            }
-            catch (System.ArgumentException)
-            {
-                Debug.Log("No bounding_box element found in PLY data");
-            }
-            
-            // No bounding box found
-            _hasBoundingBox = false;
-            return false;
-        }
-        catch (System.Exception e)
-        {
-            Debug.LogWarning($"Failed to parse bounding box data: {e.Message}");
-            _hasBoundingBox = false;
-            return false;
-        }
-    }
-
-    private bool ParseBoundingBoxFromComments(string headerText)
-    {
-        try
-        {
-            // Extract bounding box info from PLY comments
-            string[] lines = headerText.Split('\n');
-            string centerLine = null;
-            string sizeLine = null;
-            string rotationLine = null;
-            
-            foreach (string line in lines)
-            {
-                string trimmedLine = line.Trim();
-                if (trimmedLine.StartsWith("comment boundingbox_center"))
-                {
-                    centerLine = trimmedLine.Substring("comment boundingbox_center".Length).Trim();
-                }
-                else if (trimmedLine.StartsWith("comment boundingbox_size"))
-                {
-                    sizeLine = trimmedLine.Substring("comment boundingbox_size".Length).Trim();
-                }
-                else if (trimmedLine.StartsWith("comment boundingbox_rotation"))
-                {
-                    rotationLine = trimmedLine.Substring("comment boundingbox_rotation".Length).Trim();
-                }
-            }
-            
-            if (centerLine != null && sizeLine != null && rotationLine != null)
-            {
-                string[] centerParts = centerLine.Split(' ');
-                string[] sizeParts = sizeLine.Split(' ');
-                string[] rotationParts = rotationLine.Split(' ');
-                
-                if (centerParts.Length >= 3 && sizeParts.Length >= 3 && rotationParts.Length >= 4)
-                {
-                    _boundingBoxCenter = new Vector3(
-                        float.Parse(centerParts[0]),
-                        float.Parse(centerParts[1]),
-                        float.Parse(centerParts[2])
-                    );
-                    
-                    _boundingBoxSize = new Vector3(
-                        float.Parse(sizeParts[0]),
-                        float.Parse(sizeParts[1]),
-                        float.Parse(sizeParts[2])
-                    );
-                    
-                    _boundingBoxRotation = new Quaternion(
-                        float.Parse(rotationParts[0]),
-                        float.Parse(rotationParts[1]),
-                        float.Parse(rotationParts[2]),
-                        float.Parse(rotationParts[3])
-                    );
-
-                    // Calculate the bounding planes
-                    CalculateBoundingPlanes();
-                    
-                    _hasBoundingBox = true;
-                    Debug.Log($"Loaded bounding box from comments: Center={_boundingBoxCenter}, Size={_boundingBoxSize}, Rotation={_boundingBoxRotation.eulerAngles}");
-                    return true;
-                }
-            }
-            
-            _hasBoundingBox = false;
-            return false;
-        }
-        catch (System.Exception e)
-        {
-            Debug.LogWarning($"Failed to parse bounding box from comments: {e.Message}");
-            _hasBoundingBox = false;
-            return false;
-        }
-    }
-
-    private void CalculateBoundingPlanes()
-    {
-        // Calculate the 6 bounding planes from center, size, and rotation
-        Vector3[] directions = {
-            Vector3.right, Vector3.left,    // X-axis planes
-            Vector3.up, Vector3.down,       // Y-axis planes
-            Vector3.forward, Vector3.back   // Z-axis planes
-        };
-        
-        _boundingPlanes = new Vector4[6];
-        for (int i = 0; i < 6; i++) {
-            // Transform the direction by rotation
-            Vector3 normal = _boundingBoxRotation * directions[i];
-            Vector3 planePos = _boundingBoxCenter + normal * (_boundingBoxSize[i/2] * 0.5f);
-            float distance = Vector3.Dot(normal, planePos);
-            // Store as (normal.xyz, distance)
-            _boundingPlanes[i] = new Vector4(normal.x, normal.y, normal.z, distance);
-        }
-    }
-
-    public void Load()
-    {
-        using var model = Data.Load();
-
-        // Try to parse bounding box data
-        _hasBoundingBox = ParseBoundingBoxFromPly(model);
-
-        var vertex_element = model.element_view("vertex");
-        var adjacency_element = model.element_view("adjacency");
-        var vertex_count = vertex_element.count;
-        var adjacency_count = adjacency_element.count;
-
-        var vertex_tex_width = 4096;
-        var vertex_tex_height = Mathf.CeilToInt(vertex_count / (float)vertex_tex_width);
-        var vertex_tex_size = vertex_tex_width * vertex_tex_height;
-
-        var adj_tex_width = 4096;
-        var adj_tex_height = Mathf.CeilToInt(adjacency_count / (float)adj_tex_width);
-        var adj_tex_size = adj_tex_width * adj_tex_height;
-
-        // filling buffers one after the other, to ensure we don't run out of memory on webgl
-        {
-            using var attributes = new NativeArray<half4>(vertex_tex_size, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
-            new FillColorDataJob {
-                r = vertex_element.property_view("red"),
-                g = vertex_element.property_view("green"),
-                b = vertex_element.property_view("blue"),
-                density = vertex_element.property_view("density"),
-                attributes = attributes,
-            }.Schedule(vertex_count, 512).Complete();
-            attr_tex = new Texture2D(vertex_tex_width, vertex_tex_height, TextureFormat.RGBAHalf, 0, true, true);
-            attr_tex.filterMode = FilterMode.Point;
-            attr_tex.SetPixelData(attributes, 0, 0);
-            attr_tex.Apply(false, true);
-        }
-
-        points = new NativeArray<float4>(vertex_tex_size, Allocator.Persistent, NativeArrayOptions.UninitializedMemory);
-        var points_handle = new FillPointsDataJob {
-            x = vertex_element.property_view("x"),
-            y = vertex_element.property_view("y"),
-            z = vertex_element.property_view("z"),
-            adj_offset = vertex_element.property_view("adjacency_offset"),
-            points = points
-        }.Schedule(vertex_count, 512);
-
-        using var adjacency = new NativeArray<uint>(adj_tex_size, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
-        var adjacency_handle = new ReadUintJob {
-            view = adjacency_element.property_view("adjacency"),
-            target = adjacency
-        }.Schedule(adjacency_count, 512);
-
-        points_handle.Complete();
-        adjacency_handle.Complete();
-        model.Dispose(); // we can already dispose of the ply model here, as all data is already loaded.. reducing RAM usage maybe?
-
-        using var adj_diff = new NativeArray<half4>(adj_tex_size, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
-        new BuildAdjDiff { positions = points, adjacency = adjacency, adjacency_diff = adj_diff }.Schedule(vertex_count, 512).Complete();
-        adjacency_diff_tex = new Texture2D(adj_tex_width, adj_tex_height, TextureFormat.RGBAHalf, 0, true, true);
-        adjacency_diff_tex.filterMode = FilterMode.Point;
-        adjacency_diff_tex.SetPixelData(adj_diff, 0, 0);
-        adjacency_diff_tex.Apply(false, true);
-
-        positions_tex = new Texture2D(vertex_tex_width, vertex_tex_height, TextureFormat.RGBAFloat, 0, true, true);
-        positions_tex.filterMode = FilterMode.Point;
-        positions_tex.SetPixelData(points, 0, 0);
-        positions_tex.Apply(false, true);
-
-        adjacency_tex = new Texture2D(adj_tex_width, adj_tex_height, TextureFormat.RFloat, 0, true, true);
-        adjacency_tex.filterMode = FilterMode.Point;
-        adjacency_tex.SetPixelData(adjacency, 0, 0);
-        adjacency_tex.Apply(false, true);
-    }
-
-    void OnGUI()
-    {
-        if (_hasBoundingBox)
-        {
-            GUILayout.Label("Bounding Box: Active");
-            GUILayout.Label($"  Center: {_boundingBoxCenter}");
-            GUILayout.Label($"  Size: {_boundingBoxSize}");
-            GUILayout.Label($"  Rotation: {_boundingBoxRotation.eulerAngles}");
-        }
-        else
-        {
-            GUILayout.Label("Bounding Box: Not Active");
-        }
-    }
-
     void Update()
     {
         fisheye_fov = Mathf.Clamp(fisheye_fov + Input.mouseScrollDelta.y * -4, 10, 120);
         
-        // No toggle - bounding box is always active if detected in the PLY
+        // Update shader with current unbounded cells setting
+        blitMat.SetInt("_ShowUnboundedCells", showUnboundedCells ? 1 : 0);
+    }
+    
+    void OnGUI()
+    {
+        // Create a toggle button for showing/hiding unbounded cells
+        string buttonText = showUnboundedCells ? "Hide Unbounded Cells" : "Show Unbounded Cells";
+        GUI.backgroundColor = showUnboundedCells ? Color.green : Color.red;
+        
+        if (GUI.Button(toggleButtonRect, buttonText, buttonStyle))
+        {
+            showUnboundedCells = !showUnboundedCells;
+            blitMat.SetInt("_ShowUnboundedCells", showUnboundedCells ? 1 : 0);
+        }
+        
+        // Show FOV info
+        GUI.Label(new Rect(10, 50, 200, 30), $"FOV: {fisheye_fov}° (Scroll to adjust)");
+    }
+
+    // Quick Hull 3D implementation for convex hull calculation
+    private void ComputeConvexHull()
+    {
+        if (points.Length == 0)
+            return;
+
+        // Convert float4 points to Vector3 array for convex hull calculation
+        Vector3[] vertices = new Vector3[points.Length];
+        for (int i = 0; i < points.Length; i++)
+        {
+            vertices[i] = new Vector3(points[i].x, points[i].y, points[i].z);
+        }
+
+        // Compute the convex hull using QuickHull3D algorithm
+        HashSet<int> hullIndices = new HashSet<int>();
+        ComputeQuickHull3D(vertices, hullIndices);
+
+        // Create a texture to store which cells are on the convex hull
+        int texWidth = Mathf.CeilToInt(Mathf.Sqrt(points.Length));
+        int texHeight = Mathf.CeilToInt((float)points.Length / texWidth);
+        convex_hull_tex = new Texture2D(texWidth, texHeight, TextureFormat.RFloat, false);
+        convex_hull_tex.filterMode = FilterMode.Point;
+        convex_hull_tex.wrapMode = TextureWrapMode.Clamp;
+
+        // Initialize all cells as not on the convex hull
+        Color[] colors = new Color[texWidth * texHeight];
+        for (int i = 0; i < colors.Length; i++)
+        {
+            colors[i] = new Color(0, 0, 0, 0);
+        }
+
+        // Mark cells that are on the convex hull
+        foreach (int index in hullIndices)
+        {
+            if (index >= 0 && index < colors.Length)
+            {
+                colors[index] = new Color(1, 0, 0, 0); // r=1 means on hull
+            }
+        }
+
+        convex_hull_tex.SetPixels(colors);
+        convex_hull_tex.Apply();
+
+        // Pass to shader
+        blitMat.SetTexture("_convex_hull_tex", convex_hull_tex);
+        // Set the TexelSize property
+        blitMat.SetVector("_convex_hull_tex_TexelSize", 
+            new Vector4(1.0f/texWidth, 1.0f/texHeight, texWidth, texHeight));
+            
+        // Initialize the unbounded cells toggle in the shader
+        blitMat.SetInt("_ShowUnboundedCells", showUnboundedCells ? 1 : 0);
+        
+        Debug.Log($"Convex hull computed with {hullIndices.Count} vertices on the hull out of {points.Length} total points");
+    }
+
+    // QuickHull 3D implementation
+    private void ComputeQuickHull3D(Vector3[] points, HashSet<int> hullIndices)
+    {
+        if (points.Length < 4)
+        {
+            // If we have less than 4 points, all points are on the hull
+            for (int i = 0; i < points.Length; i++)
+                hullIndices.Add(i);
+            return;
+        }
+
+        // Step 1: Find the initial tetrahedron
+        int[] extremePoints = FindExtremePoints(points);
+        
+        // Step 2: Initialize the convex hull with the tetrahedron
+        List<Triangle> faces = InitializeTetrahedron(points, extremePoints);
+        
+        // Mapping of points to their assigned faces for quick lookup
+        Dictionary<int, int> pointToFace = new Dictionary<int, int>();
+        
+        // Step 3: Assign each point to a face if it's outside
+        for (int i = 0; i < points.Length; i++)
+        {
+            if (Array.IndexOf(extremePoints, i) >= 0)
+                continue; // Skip the extreme points as they're already on the hull
+                
+            float maxDistance = 0;
+            int assignedFace = -1;
+            
+            for (int f = 0; f < faces.Count; f++)
+            {
+                float distance = PointFaceDistance(points[i], faces[f], points);
+                if (distance > 0 && distance > maxDistance)
+                {
+                    maxDistance = distance;
+                    assignedFace = f;
+                }
+            }
+            
+            if (assignedFace >= 0)
+            {
+                faces[assignedFace].outsidePoints.Add(i);
+                pointToFace[i] = assignedFace;
+            }
+        }
+        
+        // Step 4: Process each face
+        while (true)
+        {
+            int faceIndex = -1;
+            int furthestPoint = -1;
+            float maxDistance = 0;
+            
+            // Find the face with the furthest point
+            for (int f = 0; f < faces.Count; f++)
+            {
+                if (faces[f].outsidePoints.Count == 0)
+                    continue;
+                    
+                // Find furthest point for this face
+                foreach (int p in faces[f].outsidePoints)
+                {
+                    float distance = PointFaceDistance(points[p], faces[f], points);
+                    if (distance > maxDistance)
+                    {
+                        maxDistance = distance;
+                        furthestPoint = p;
+                        faceIndex = f;
+                    }
+                }
+            }
+            
+            if (faceIndex == -1)
+                break; // No more points outside
+                
+            // Add this point to the hull
+            hullIndices.Add(furthestPoint);
+            
+            // Find all faces visible from this point
+            List<int> visibleFaces = new List<int>();
+            for (int f = 0; f < faces.Count; f++)
+            {
+                if (PointFaceDistance(points[furthestPoint], faces[f], points) > 0)
+                    visibleFaces.Add(f);
+            }
+            
+            // Find horizon edges
+            List<Edge> horizon = new List<Edge>();
+            FindHorizonEdges(faces, visibleFaces, horizon);
+            
+            // Create new faces connecting the point to horizon edges
+            List<int> newFaces = new List<int>();
+            foreach (Edge edge in horizon)
+            {
+                Triangle newFace = new Triangle(
+                    edge.v1, edge.v2, furthestPoint,
+                    CalculateNormal(points[edge.v1], points[edge.v2], points[furthestPoint]));
+                faces.Add(newFace);
+                newFaces.Add(faces.Count - 1);
+            }
+            
+            // Reassign points from deleted faces to new faces
+            foreach (int f in visibleFaces)
+            {
+                foreach (int p in faces[f].outsidePoints)
+                {
+                    float maxDist = 0;
+                    int bestFace = -1;
+                    
+                    for (int nf = 0; nf < newFaces.Count; nf++)
+                    {
+                        float dist = PointFaceDistance(points[p], faces[newFaces[nf]], points);
+                        if (dist > 0 && dist > maxDist)
+                        {
+                            maxDist = dist;
+                            bestFace = newFaces[nf];
+                        }
+                    }
+                    
+                    if (bestFace >= 0)
+                    {
+                        faces[bestFace].outsidePoints.Add(p);
+                        pointToFace[p] = bestFace;
+                    }
+                }
+            }
+            
+            // Remove visible faces (in reverse order to avoid index issues)
+            visibleFaces.Sort((a, b) => b.CompareTo(a));
+            foreach (int f in visibleFaces)
+            {
+                faces.RemoveAt(f);
+            }
+        }
+        
+        // Add all vertices from the final faces to the hull
+        foreach (var face in faces)
+        {
+            hullIndices.Add(face.v1);
+            hullIndices.Add(face.v2);
+            hullIndices.Add(face.v3);
+        }
+    }
+
+    // Helper method to find extreme points for the initial tetrahedron
+    private int[] FindExtremePoints(Vector3[] points)
+    {
+        int[] result = new int[4];
+        
+        // Find min/max points along each axis
+        int minX = 0, maxX = 0, minY = 0, maxY = 0, minZ = 0, maxZ = 0;
+        
+        for (int i = 1; i < points.Length; i++)
+        {
+            if (points[i].x < points[minX].x) minX = i;
+            if (points[i].x > points[maxX].x) maxX = i;
+            if (points[i].y < points[minY].y) minY = i;
+            if (points[i].y > points[maxY].y) maxY = i;
+            if (points[i].z < points[minZ].z) minZ = i;
+            if (points[i].z > points[maxZ].z) maxZ = i;
+        }
+        
+        // Find two most distant points for initial edge
+        int[] candidates = { minX, maxX, minY, maxY, minZ, maxZ };
+        float maxDist = 0;
+        int p1 = 0, p2 = 0;
+        
+        for (int i = 0; i < candidates.Length; i++)
+        {
+            for (int j = i + 1; j < candidates.Length; j++)
+            {
+                float dist = Vector3.Distance(points[candidates[i]], points[candidates[j]]);
+                if (dist > maxDist)
+                {
+                    maxDist = dist;
+                    p1 = candidates[i];
+                    p2 = candidates[j];
+                }
+            }
+        }
+        
+        result[0] = p1;
+        result[1] = p2;
+        
+        // Find point farthest from the line p1-p2
+        float maxLineDistance = 0;
+        int p3 = 0;
+        
+        for (int i = 0; i < points.Length; i++)
+        {
+            if (i == p1 || i == p2) continue;
+            
+            float dist = PointLineDistance(points[i], points[p1], points[p2]);
+            if (dist > maxLineDistance)
+            {
+                maxLineDistance = dist;
+                p3 = i;
+            }
+        }
+        
+        result[2] = p3;
+        
+        // Find point farthest from the plane p1-p2-p3
+        float maxPlaneDistance = 0;
+        int p4 = 0;
+        Vector3 normal = Vector3.Cross(
+            points[p2] - points[p1],
+            points[p3] - points[p1]
+        ).normalized;
+        
+        for (int i = 0; i < points.Length; i++)
+        {
+            if (i == p1 || i == p2 || i == p3) continue;
+            
+            float dist = Mathf.Abs(Vector3.Dot(points[i] - points[p1], normal));
+            if (dist > maxPlaneDistance)
+            {
+                maxPlaneDistance = dist;
+                p4 = i;
+            }
+        }
+        
+        result[3] = p4;
+        return result;
+    }
+
+    // Helper methods: These remain the same as previous implementation
+    private List<Triangle> InitializeTetrahedron(Vector3[] points, int[] extremePoints)
+    {
+        // Same as before
+        List<Triangle> faces = new List<Triangle>();
+        
+        // Calculate face normals pointing outward
+        Vector3 center = (points[extremePoints[0]] + points[extremePoints[1]] + 
+                         points[extremePoints[2]] + points[extremePoints[3]]) / 4;
+        
+        // Create faces ensuring consistent orientation
+        Triangle face1 = new Triangle(
+            extremePoints[0], extremePoints[1], extremePoints[2],
+            CalculateNormal(points[extremePoints[0]], points[extremePoints[1]], points[extremePoints[2]])
+        );
+        
+        Triangle face2 = new Triangle(
+            extremePoints[0], extremePoints[2], extremePoints[3],
+            CalculateNormal(points[extremePoints[0]], points[extremePoints[2]], points[extremePoints[3]])
+        );
+        
+        Triangle face3 = new Triangle(
+            extremePoints[0], extremePoints[3], extremePoints[1],
+            CalculateNormal(points[extremePoints[0]], points[extremePoints[3]], points[extremePoints[1]])
+        );
+        
+        Triangle face4 = new Triangle(
+            extremePoints[1], extremePoints[3], extremePoints[2],
+            CalculateNormal(points[extremePoints[1]], points[extremePoints[3]], points[extremePoints[2]])
+        );
+        
+        // Ensure all normals point outward
+        EnsureOutwardNormal(face1, center, points);
+        EnsureOutwardNormal(face2, center, points);
+        EnsureOutwardNormal(face3, center, points);
+        EnsureOutwardNormal(face4, center, points);
+        
+        faces.Add(face1);
+        faces.Add(face2);
+        faces.Add(face3);
+        faces.Add(face4);
+        
+        return faces;
+    }
+
+    private Vector3 CalculateNormal(Vector3 a, Vector3 b, Vector3 c)
+    {
+        return Vector3.Cross(b - a, c - a).normalized;
+    }
+
+    private void EnsureOutwardNormal(Triangle face, Vector3 center, Vector3[] points)
+    {
+        Vector3 faceCenter = (points[face.v1] + points[face.v2] + points[face.v3]) / 3;
+        Vector3 toCenter = center - faceCenter;
+        
+        if (Vector3.Dot(face.normal, toCenter) > 0)
+        {
+            // Normal points inward, flip it
+            face.normal = -face.normal;
+            int temp = face.v1;
+            face.v1 = face.v2;
+            face.v2 = temp;
+        }
+    }
+
+    private float PointFaceDistance(Vector3 point, Triangle face, Vector3[] vertices)
+    {
+        Vector3 v1 = vertices[face.v1];
+        return Vector3.Dot(point - v1, face.normal);
+    }
+
+    private float PointLineDistance(Vector3 point, Vector3 lineStart, Vector3 lineEnd)
+    {
+        Vector3 line = lineEnd - lineStart;
+        Vector3 pointVector = point - lineStart;
+        Vector3 projection = Vector3.Project(pointVector, line);
+        return Vector3.Distance(pointVector, projection);
+    }
+
+    private void FindHorizonEdges(List<Triangle> faces, List<int> visibleFaces, List<Edge> horizon)
+    {
+        // Same as before
+        List<Edge> allEdges = new List<Edge>();
+        foreach (int f in visibleFaces)
+        {
+            allEdges.Add(new Edge(faces[f].v1, faces[f].v2));
+            allEdges.Add(new Edge(faces[f].v2, faces[f].v3));
+            allEdges.Add(new Edge(faces[f].v3, faces[f].v1));
+        }
+        
+        for (int i = 0; i < allEdges.Count; i++)
+        {
+            bool isDuplicate = false;
+            for (int j = 0; j < allEdges.Count; j++)
+            {
+                if (i == j) continue;
+                if (allEdges[i].Equals(allEdges[j]))
+                {
+                    isDuplicate = true;
+                    break;
+                }
+            }
+            
+            if (!isDuplicate)
+                horizon.Add(allEdges[i]);
+        }
+    }
+
+    private class Triangle
+    {
+        public int v1, v2, v3;
+        public Vector3 normal;
+        public List<int> outsidePoints = new List<int>();
+        
+        public Triangle(int v1, int v2, int v3, Vector3 normal)
+        {
+            this.v1 = v1;
+            this.v2 = v2;
+            this.v3 = v3;
+            this.normal = normal;
+        }
+    }
+
+    private class Edge
+    {
+        public int v1, v2;
+        
+        public Edge(int v1, int v2)
+        {
+            if (v1 <= v2)
+            {
+                this.v1 = v1;
+                this.v2 = v2;
+            }
+            else
+            {
+                this.v1 = v2;
+                this.v2 = v1;
+            }
+        }
+        
+        public override bool Equals(object obj)
+        {
+            if (obj is Edge other)
+                return v1 == other.v1 && v2 == other.v2;
+            return false;
+        }
+        
+        public override int GetHashCode()
+        {
+            return v1.GetHashCode() ^ v2.GetHashCode();
+        }
     }
 
     void OnRenderImage(RenderTexture srcRenderTex, RenderTexture outRenderTex)
@@ -322,8 +520,6 @@ public class RadFoamWebGL : MonoBehaviour
         var world_to_model = Matrix4x4.Scale(new Vector3(1, -1, 1)) * Target.worldToLocalMatrix;
 
         {
-            // TODO: we could use some acceleration structure for finding the closest cell.. 
-            // but it's a few million points, a linear search should not be the bottleneck here (+the added memory for the acceleration structure)
             var local_camera_pos = world_to_model.MultiplyPoint3x4(camera.transform.position);
             using var closest = new NativeArray<uint>(1, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
             new FindClosest() { target = local_camera_pos, positions = points, closest = closest }.Schedule().Complete();
@@ -335,26 +531,20 @@ public class RadFoamWebGL : MonoBehaviour
             blitMat.SetMatrix("_InverseProjectionMatrix", camera.projectionMatrix.inverse);
             blitMat.SetFloat("_FisheyeFOV", fisheye_fov);
 
-            // Set bounding box data
-            blitMat.SetInt("_HasBoundingBox", _hasBoundingBox ? 1 : 0);
-            if (_hasBoundingBox)
-            {
-                
-                for (int i = 0; i < 6; i++){
-                    _boundingPlanes[i] = _boundingPlanes[i];
-                }
-                blitMat.SetVectorArray("_BoundingPlanes", _boundingPlanes);
-            }
-
             blitMat.SetTexture("_positions_tex", positions_tex);
             blitMat.SetTexture("_adjacency_tex", adjacency_tex);
             blitMat.SetTexture("_adjacency_diff_tex", adjacency_diff_tex);
             blitMat.SetTexture("_attr_tex", attr_tex);
+            blitMat.SetTexture("_convex_hull_tex", convex_hull_tex);
+            
+            // Update the show unbounded cells parameter
+            blitMat.SetInt("_ShowUnboundedCells", showUnboundedCells ? 1 : 0);
 
             Graphics.Blit(srcRenderTex, outRenderTex, blitMat);
         }
     }
 
+    // Existing job structs remain the same
     [BurstCompile]
     struct FillPointsDataJob : IJobParallelFor
     {
@@ -370,7 +560,7 @@ public class RadFoamWebGL : MonoBehaviour
                 x.Get<float>(index),
                 y.Get<float>(index),
                 z.Get<float>(index),
-                adj_offset.Get<float>(index)); // this actually contains a uint, but we just treat it as a float 
+                adj_offset.Get<float>(index));
         }
     }
 
@@ -400,7 +590,6 @@ public class RadFoamWebGL : MonoBehaviour
     public struct ReadUintJob : IJobParallelFor
     {
         [ReadOnly] public PropertyView view;
-
         [WriteOnly] public NativeArray<uint> target;
 
         public void Execute(int index)
@@ -414,8 +603,6 @@ public class RadFoamWebGL : MonoBehaviour
     {
         [ReadOnly] public NativeArray<float4> positions;
         [ReadOnly] public NativeArray<uint> adjacency;
-
-        // [NativeDisableParallelForRestriction] may be bad here.. especially as it may run with user provided data, which may be invalid
         [WriteOnly, NativeDisableParallelForRestriction] public NativeArray<half4> adjacency_diff;
 
         public void Execute(int index)

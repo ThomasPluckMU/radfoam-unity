@@ -247,34 +247,7 @@ namespace Ply
                         // Write PLY header
                         writer.Write(System.Text.Encoding.ASCII.GetBytes("ply\n"));
                         writer.Write(System.Text.Encoding.ASCII.GetBytes("format binary_little_endian 1.0\n"));
-                        
-                        // Add bounding box info as a comment
-                        if (useBoundingBox)
-                        {
-                            string bbCenterStr = $"{boundingBoxCenter.x} {boundingBoxCenter.y} {boundingBoxCenter.z}";
-                            string bbSizeStr = $"{boundingBoxSize.x} {boundingBoxSize.y} {boundingBoxSize.z}";
-                            string bbRotStr = $"{boundingBoxRotation.x} {boundingBoxRotation.y} {boundingBoxRotation.z} {boundingBoxRotation.w}";
-                            
-                            writer.Write(System.Text.Encoding.ASCII.GetBytes($"comment boundingbox_center {bbCenterStr}\n"));
-                            writer.Write(System.Text.Encoding.ASCII.GetBytes($"comment boundingbox_size {bbSizeStr}\n"));
-                            writer.Write(System.Text.Encoding.ASCII.GetBytes($"comment boundingbox_rotation {bbRotStr}\n"));
-                        }
-                        
-                        // Add a dedicated bounding_box element 
-                        if (useBoundingBox)
-                        {
-                            writer.Write(System.Text.Encoding.ASCII.GetBytes("element bounding_box 1\n"));
-                            writer.Write(System.Text.Encoding.ASCII.GetBytes("property float center_x\n"));
-                            writer.Write(System.Text.Encoding.ASCII.GetBytes("property float center_y\n"));
-                            writer.Write(System.Text.Encoding.ASCII.GetBytes("property float center_z\n"));
-                            writer.Write(System.Text.Encoding.ASCII.GetBytes("property float size_x\n"));
-                            writer.Write(System.Text.Encoding.ASCII.GetBytes("property float size_y\n"));
-                            writer.Write(System.Text.Encoding.ASCII.GetBytes("property float size_z\n"));
-                            writer.Write(System.Text.Encoding.ASCII.GetBytes("property float rotation_x\n"));
-                            writer.Write(System.Text.Encoding.ASCII.GetBytes("property float rotation_y\n"));
-                            writer.Write(System.Text.Encoding.ASCII.GetBytes("property float rotation_z\n"));
-                            writer.Write(System.Text.Encoding.ASCII.GetBytes("property float rotation_w\n"));
-                        }
+    
                         
                         // Write vertex element
                         writer.Write(System.Text.Encoding.ASCII.GetBytes($"element vertex {outputCount}\n"));
@@ -301,21 +274,6 @@ namespace Ply
                         }
                         
                         writer.Write(System.Text.Encoding.ASCII.GetBytes("end_header\n"));
-                        
-                        // Write bounding box data
-                        if (useBoundingBox)
-                        {
-                            writer.Write(boundingBoxCenter.x);
-                            writer.Write(boundingBoxCenter.y);
-                            writer.Write(boundingBoxCenter.z);
-                            writer.Write(boundingBoxSize.x);
-                            writer.Write(boundingBoxSize.y);
-                            writer.Write(boundingBoxSize.z);
-                            writer.Write(boundingBoxRotation.x);
-                            writer.Write(boundingBoxRotation.y);
-                            writer.Write(boundingBoxRotation.z);
-                            writer.Write(boundingBoxRotation.w);
-                        }
                         
                         // Write vertex data
                         ReportProgress(progressCallback, 0.5f, "Writing vertex data...");
