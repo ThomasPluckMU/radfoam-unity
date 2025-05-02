@@ -27,12 +27,16 @@ namespace Ply
         [SerializeField]
         private Quaternion rotation;
 
+        [SerializeField]
+        private Texture2D[] boundaryTextures;
+
         public Element[] Elements { get => elements; }
         public TextAsset Binary { get => binary; }
         public bool HasTSRData { get => hasTSRData; }
         public Vector3 Translation { get => translation; }
         public Vector3 Scale { get => scale; }
         public Quaternion Rotation { get => rotation; }
+        public Texture2D[] BoundaryTextures { get => boundaryTextures; }
 
         public void ReadFromStream(FileStream stream)
         {
@@ -49,6 +53,8 @@ namespace Ply
             translation = tsr.translation;
             scale = tsr.scale;
             rotation = tsr.rotation;
+
+            boundaryTextures = tsr.boundaryTextures;
         }
 
         public Model Load()
@@ -240,13 +246,21 @@ namespace Ply
         public Vector3 translation;
         public Vector3 scale;
         public Quaternion rotation;
+        public Texture2D[] boundaryTextures;
 
-        public TSRData(bool hasTSRData, Vector3 translation, Vector3 scale, Quaternion rotation)
+        public TSRData(
+            bool hasTSRData,
+            Vector3 translation,
+            Vector3 scale,
+            Quaternion rotation,
+            Texture2D[] boundaryTextures
+)
         {
             this.hasTSRData = hasTSRData;
             this.translation = translation;
             this.scale = scale;
             this.rotation = rotation;
+            this.boundaryTextures = boundaryTextures ?? new Texture2D[0];
         }
     }
 
@@ -329,6 +343,10 @@ namespace Ply
                     elements.Add(new Element { name = name, count = count, properties = properties.ToArray() });
             }
 
+            // For storing boundary textures
+            Dictionary<int, string> textureDataDict = new Dictionary<int, string>();
+            string texturePrefix = "";
+
             for (int line = 0; line < MAX_HEADER_LINES; ++line) {
                 var col = read_next_line().Split();
                 var kind = line_kind_from_name(col[0]);
@@ -370,18 +388,53 @@ namespace Ply
                             rotation.w = float.Parse(col[2]);
                         }
                     }
+                } else if (col[1] == "boundary_texture_prefix") {
+                    texturePrefix = col[2];
+                } else if (col[1].StartsWith("boundary_texture_") && col[1].Contains("_data")) {
+                        // Extract texture index from boundary_texture_X_data
+                        string[] parts = col[1].Split('_');
+                        if (parts.Length >= 3 && int.TryParse(parts[2], out int textureIndex))
+                        {
+                            // Collect the base64 data
+                            string textureData = col[2]; // Or join remaining columns if needed
+                            textureDataDict[textureIndex] = textureData;
+                        }
                 } else if (kind == HeaderLineKind.EndHeader) {
                     add_current_element();
                     break;
+                } 
+            }
+
+            // After the header parsing loop, before returning:
+            Texture2D[] textures = new Texture2D[6]; // Assuming 6 textures for cube faces
+
+            // Convert base64 data to textures
+            foreach (var pair in textureDataDict)
+            {
+                try
+                {
+                    int index = pair.Key;
+                    if (index >= 0 && index < 6)
+                    {
+                        byte[] textureBytes = Convert.FromBase64String(pair.Value);
+                        Texture2D texture = new Texture2D(2, 2);
+                        texture.LoadImage(textureBytes);
+                        textures[index] = texture;
+                    }
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning($"Failed to decode texture {pair.Key}: {e.Message}");
                 }
             }
-            
+
             // Create a TSRData struct to return with the header information
             TSRData tsrData = new TSRData(
                 hasTSRData, 
                 translation, 
                 scale, 
-                rotation
+                rotation,
+                textures
             );
             
             return (elements.ToArray(), read_count, tsrData);

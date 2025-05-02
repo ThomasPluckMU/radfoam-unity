@@ -189,24 +189,20 @@ namespace Ply
                         }
                     }
                     
+                    // Generate boundary textures if bounding box is used
+                    Texture2D[] boundaryTextures = new Texture2D[6];
                     if (useBoundingBox)
                     {
                         ReportProgress(progressCallback, 0.35f, "Generating boundary lookup data...");
                         
-                        // Create positions array for cells not excluded
-                        Vector3[] positions = new Vector3[outputCount];
-                        
-                        int posIdx = 0;
-                        for (int i = 0; i < totalVertices; i++)
-                        {
-                            if (excludedPoints.Contains(i)) continue;
-                            
-                            positions[posIdx++] = new Vector3(
-                                xView.Get<float>(i),
-                                yView.Get<float>(i),
-                                zView.Get<float>(i)
-                            );
-                        }
+                        // Generate boundary textures by calling BoundaryTextureGenerator
+                        boundaryTextures = GenerateBoundaryTextures(
+                            sourceData,
+                            boundingBoxCenter,
+                            boundingBoxSize,
+                            boundingBoxRotation,
+                            4096
+                        );
                     }
                     
                     // Open the file for writing
@@ -238,6 +234,9 @@ namespace Ply
                             writer.Write(System.Text.Encoding.ASCII.GetBytes($"comment bb_rotation_z {boundingBoxRotation.z}\n"));
                             writer.Write(System.Text.Encoding.ASCII.GetBytes($"comment bb_rotation_w {boundingBoxRotation.w}\n"));
                             
+                            // Add comment for boundary texture files
+                            string texturePrefix = Path.GetFileNameWithoutExtension(path);
+                            writer.Write(System.Text.Encoding.ASCII.GetBytes($"comment boundary_texture_prefix {texturePrefix}\n"));
                         }
                         
                         // Write vertex element
@@ -320,6 +319,17 @@ namespace Ply
                                 writer.Write(adj);
                             }
                         }
+
+                        // Additionally encode the texture data directly in the PLY
+                        for (int i = 0; i < boundaryTextures.Length; i++)
+                        {
+                            // Convert texture to bytes
+                            byte[] textureBytes = boundaryTextures[i].EncodeToPNG();
+                            
+                            // Encode as Base64 string and write to file as comment
+                            string textureData = Convert.ToBase64String(textureBytes);
+                            writer.Write(System.Text.Encoding.ASCII.GetBytes($"comment boundary_texture_{i}_data {textureData}\n"));
+                        }
                     }
                     
                     ReportProgress(progressCallback, 1.0f, "Export complete!");
@@ -335,7 +345,47 @@ namespace Ply
             }
         }
         
-        // Generate boundary lookup dawn
+        // Convenience method to generate only boundary textures without exporting PLY
+        public static Texture2D[] GenerateBoundaryTextures(
+            PlyData sourceData,
+            Vector3 boundingBoxCenter,
+            Vector3 boundingBoxSize,
+            Quaternion boundingBoxRotation,
+            int resolution = 1024,
+            Action<float, string> progressCallback = null)
+        {
+            if (sourceData == null)
+            {
+                Debug.LogError("Null PlyData source provided to texture generator");
+                throw new ArgumentNullException(nameof(sourceData));
+            }
+            
+            try
+            {
+                Texture2D[] boundaryTexture = new Texture2D[6];
+
+                // Call the boundary texture generator from BoundaryTexture.cs
+                for (int i = 0; i < 6; i++) {
+                    boundaryTexture[i] = BoundaryTextureGenerator.GenerateBoundaryTexture(
+                        sourceData,
+                        i,
+                        resolution,
+                        boundingBoxCenter,
+                        boundingBoxSize,
+                        boundingBoxRotation,
+                        progressCallback
+                    );
+                }
+
+                return boundaryTexture;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"Error generating boundary textures: {e.Message}\n{e.StackTrace}");
+                throw new ArgumentNullException(nameof(sourceData));
+            }
+        }
+        
         private static void ReportProgress(Action<float, string> callback, float progress, string message)
         {
             callback?.Invoke(progress, message);

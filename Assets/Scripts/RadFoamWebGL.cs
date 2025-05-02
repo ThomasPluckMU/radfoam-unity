@@ -28,6 +28,8 @@ public class RadFoamWebGL : MonoBehaviour
     private Vector3 _BoundingBoxCenter = Vector3.zero;
     private Vector3 _BoundingBoxSize = Vector3.one;
     private Quaternion _BoundingBoxRotation = Quaternion.identity;
+    private Texture2D[] boundaryTextures;
+    private bool hasBoundaryTextures = false;
 
     void Start()
     {
@@ -154,6 +156,19 @@ public class RadFoamWebGL : MonoBehaviour
             boundingBoxSize = _BoundingBoxSize;
             boundingBoxRotation = _BoundingBoxRotation;
         }
+
+        // Check for boundary textures
+        if (Data != null && Data.BoundaryTextures != null && Data.BoundaryTextures.Length > 0)
+        {
+            boundaryTextures = Data.BoundaryTextures;
+            hasBoundaryTextures = true;
+            Debug.Log($"Found {boundaryTextures.Length} boundary textures in PLY data");
+        }
+        else
+        {
+            hasBoundaryTextures = false;
+            Debug.Log("No boundary textures available");
+        }
     }
     
     void OnGUI()
@@ -244,6 +259,23 @@ public class RadFoamWebGL : MonoBehaviour
             blitMat.SetTexture("_attr_tex", attr_tex);
 
             blitMat.SetInt("_NumCells", points.Length);
+            
+            if (hasBoundaryTextures && boundaryTextures != null)
+            {
+                blitMat.SetInt("_HasBoundaryTextures", 1);
+                for (int i = 0; i < boundaryTextures.Length && i < 6; i++)
+                {
+                    if (boundaryTextures[i] != null)
+                    {
+                        // Set each face texture (+X, -X, +Y, -Y, +Z, -Z)
+                        blitMat.SetTexture($"_BoundaryTexture{i}", boundaryTextures[i]);
+                    }
+                }
+            }
+            else
+            {
+                blitMat.SetInt("_HasBoundaryTextures", 0);
+            }
 
             Graphics.Blit(srcRenderTex, outRenderTex, blitMat);
         }

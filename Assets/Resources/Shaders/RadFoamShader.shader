@@ -67,6 +67,95 @@ Shader "Hidden/Custom/RadFoamShader"
             float4x4 _BoundingBoxRotation;
             float4x4 _BoundingBoxTRS;
             float4x4 _InvBoundingBoxTRS;
+            
+            // Boundary textures
+            int _HasBoundaryTextures;
+            sampler2D _BoundaryTexture0; // +X
+            sampler2D _BoundaryTexture1; // -X
+            sampler2D _BoundaryTexture2; // +Y
+            sampler2D _BoundaryTexture3; // -Y
+            sampler2D _BoundaryTexture4; // +Z
+            sampler2D _BoundaryTexture5; // -Z
+            
+            float2 index_to_tex_buffer(uint i, float2 texel_size, uint width) {
+                uint y = i / width;
+                uint x = i % width;
+                return float2((x + 0.5) * texel_size.x, (y + 0.5) * texel_size.y);
+            }
+            
+            float4 positions_buff(uint i) {
+                return tex2Dlod(_positions_tex, float4(index_to_tex_buffer(i, _positions_tex_TexelSize.xy, 4096), 0, 0));
+            }
+
+            float4 attrs_buff(uint i) {
+                return tex2Dlod(_attr_tex, float4(index_to_tex_buffer(i, _positions_tex_TexelSize.xy, 4096), 0, 0));
+            }
+
+            uint adjacency_buffer(uint i) {
+                return asuint(tex2Dlod(_adjacency_tex, float4(index_to_tex_buffer(i, _adjacency_tex_TexelSize.xy, 4096), 0, 0)).x);
+            }
+
+            float3 adjacency_diff_buffer(uint i) {
+                return tex2Dlod(_adjacency_diff_tex, float4(index_to_tex_buffer(i, _adjacency_tex_TexelSize.xy, 4096), 0, 0)).xyz;
+            }
+
+            // Sample the boundary texture based on world position and face index
+            float4 SampleBoundaryTexture(float3 worldPos, int faceIndex) {
+                // Transform point to local box space
+                float3 localPos = mul(_InvBoundingBoxTRS, float4(worldPos, 1.0)).xyz;
+                
+                // Normalize to 0-1 range within the box
+                float3 normalizedPos = (localPos / _BoundingBoxSize) + 0.5;
+                
+                // Calculate UV based on face
+                float2 uv = float2(0, 0);
+                switch(faceIndex) {
+                    case 0: // +X face
+                        uv = float2(normalizedPos.z, normalizedPos.y);
+                        return tex2D(_BoundaryTexture0, uv);
+                    case 1: // -X face
+                        uv = float2(1.0 - normalizedPos.z, normalizedPos.y);
+                        return tex2D(_BoundaryTexture1, uv);
+                    case 2: // +Y face
+                        uv = float2(normalizedPos.x, normalizedPos.z);
+                        return tex2D(_BoundaryTexture2, uv);
+                    case 3: // -Y face
+                        uv = float2(normalizedPos.x, 1.0 - normalizedPos.z);
+                        return tex2D(_BoundaryTexture3, uv);
+                    case 4: // +Z face
+                        uv = float2(normalizedPos.x, normalizedPos.y);
+                        return tex2D(_BoundaryTexture4, uv);
+                    case 5: // -Z face
+                        uv = float2(1.0 - normalizedPos.x, normalizedPos.y);
+                        return tex2D(_BoundaryTexture5, uv);
+                    default:
+                        return float4(0, 0, 0, 0);
+                }
+            }
+            
+            // Determine which face of the bounding box was hit (0-5 for +X, -X, +Y, -Y, +Z, -Z)
+            int GetHitFace(float3 localPos, float3 localNormal) {
+                float3 absNormal = abs(localNormal);
+                
+                // Find dominant axis
+                if (absNormal.x > absNormal.y && absNormal.x > absNormal.z) {
+                    return localNormal.x > 0 ? 0 : 1; // +X or -X
+                }
+                else if (absNormal.y > absNormal.x && absNormal.y > absNormal.z) {
+                    return localNormal.y > 0 ? 2 : 3; // +Y or -Y
+                }
+                else {
+                    return localNormal.z > 0 ? 4 : 5; // +Z or -Z
+                }
+            }
+
+            uint DecodeIndexFromColor(float4 color) {
+                // Convert color components to bytes and reconstruct the index
+                uint r = uint(color.r * 255) << 16;
+                uint g = uint(color.g * 255) << 8;
+                uint b = uint(color.b * 255);
+                return r | g | b;
+            }            
 
             blit_v2f blitvert(blit_data v)
             {
@@ -150,28 +239,6 @@ Shader "Hidden/Custom/RadFoamShader"
                 return true;
             }
 
-            float2 index_to_tex_buffer(uint i, float2 texel_size, uint width) {
-                uint y = i / width;
-                uint x = i % width;
-                return float2((x + 0.5) * texel_size.x, (y + 0.5) * texel_size.y);
-            }
-
-            float4 positions_buff(uint i) {
-                return tex2Dlod(_positions_tex, float4(index_to_tex_buffer(i, _positions_tex_TexelSize.xy, 4096), 0, 0));
-            }
-
-            float4 attrs_buff(uint i) {
-                return tex2Dlod(_attr_tex, float4(index_to_tex_buffer(i, _positions_tex_TexelSize.xy, 4096), 0, 0));
-            }
-
-            uint adjacency_buffer(uint i) {
-                return asuint(tex2Dlod(_adjacency_tex, float4(index_to_tex_buffer(i, _adjacency_tex_TexelSize.xy, 4096), 0, 0)).x);
-            }
-
-            float3 adjacency_diff_buffer(uint i) {
-                return tex2Dlod(_adjacency_diff_tex, float4(index_to_tex_buffer(i, _adjacency_tex_TexelSize.xy, 4096), 0, 0)).xyz;
-            }
-
             #define CHUNK_SIZE 8
 
             fixed4 frag (blit_v2f input) : SV_Target
@@ -188,32 +255,44 @@ Shader "Hidden/Custom/RadFoamShader"
                 // Perform ray-box intersection test if bounding box is present
                 float box_t_enter, box_t_exit;
                 if (_HasBoundingBox) {
-                    
                     bool intersects_box = RayBoxIntersection(ray, box_t_enter, box_t_exit);
-
+                
                     // Early termination if ray doesn't hit bounding box
                     if (!intersects_box) {
                         return src_color;
-                    } else if (intersects_box) {
-                        float3 entry_point = ray.origin + ray.direction * box_t_enter;
-                        
-                        // Find the closest cell to this entry point
-                        uint closest_cell = 0xFFFFFFFF;
-                        float min_dist = 10000.0;
-                        
-                        // This could be optimized, but for now, a linear search through cells
-                        for (uint c = 0; c < _NumCells; c++) {
-                            float3 cell_pos = positions_buff(c).xyz;
-                            float dist = length(entry_point - cell_pos);
+                    } else {
+                        // Check if we have boundary textures
+                        if (_HasBoundaryTextures == 1) {
+                            // Calculate hit position on box
+                            float3 hitPos = ray.origin + ray.direction * box_t_enter;
                             
-                            if (dist < min_dist) {
-                                min_dist = dist;
-                                closest_cell = c;
-                            }
+                            // Transform hit position to local space
+                            float3 localHitPos = mul(_InvBoundingBoxTRS, float4(hitPos, 1.0)).xyz;
+                            
+                            // Determine face normal (which is the same as the axis with the max component)
+                            float3 localNormal = float3(0, 0, 0);
+                            
+                            // Determine which face was hit based on local position and box size
+                            float3 normalizedPos = localHitPos / (_BoundingBoxSize * 0.5);
+                            float maxComp = max(abs(normalizedPos.x), max(abs(normalizedPos.y), abs(normalizedPos.z)));
+                            
+                            if (abs(normalizedPos.x) == maxComp) localNormal = float3(sign(normalizedPos.x), 0, 0);
+                            else if (abs(normalizedPos.y) == maxComp) localNormal = float3(0, sign(normalizedPos.y), 0);
+                            else localNormal = float3(0, 0, sign(normalizedPos.z));
+                            
+                            // Get face index
+                            int faceIndex = GetHitFace(localHitPos, localNormal);
+                            
+                            // Look up cell index from boundary texture
+                            float4 boundaryData = SampleBoundaryTexture(hitPos, faceIndex);
+                            
+                            // Extract cell index from texture (stored in the R channel as a normalized float)
+                            cell = DecodeIndexFromColor(boundaryData);
+                            
+                        } else {
+                            // If no boundary textures, fall back to closest cell
+                            cell = _start_index;
                         }
-                        
-                        // Use this as our starting cell instead of _start_index
-                        cell = (closest_cell != 0xFFFFFFFF) ? closest_cell : _start_index;
                     }
                 } else {
                     cell = _start_index;
