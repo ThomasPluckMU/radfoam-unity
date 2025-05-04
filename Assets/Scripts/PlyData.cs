@@ -7,62 +7,6 @@ using UnityEngine;
 
 namespace Ply
 {
-    public class PlyData : ScriptableObject
-    {
-        [SerializeField]
-        private Element[] elements;
-
-        [SerializeField]
-        private TextAsset binary;
-
-        [SerializeField]
-        private bool hasTSRData;
-
-        [SerializeField]
-        private Vector3 translation;
-
-        [SerializeField]
-        private Vector3 scale;
-
-        [SerializeField]
-        private Quaternion rotation;
-
-        [SerializeField]
-        private Texture2D[] boundaryTextures;
-
-        public Element[] Elements { get => elements; }
-        public TextAsset Binary { get => binary; }
-        public bool HasTSRData { get => hasTSRData; }
-        public Vector3 Translation { get => translation; }
-        public Vector3 Scale { get => scale; }
-        public Quaternion Rotation { get => rotation; }
-        public Texture2D[] BoundaryTextures { get => boundaryTextures; }
-
-        public void ReadFromStream(FileStream stream)
-        {
-            var (header, read_count, tsr) = PlyDataParser.read_header(stream);
-            using var binary_data = PlyDataParser.read_binary_blob(stream, read_count, Allocator.Temp);
-            var binary_asset = new TextAsset(binary_data) {
-                name = "binary_data"
-            };
-            elements = header;
-            binary = binary_asset;
-            
-            // Store TSR data if available
-            hasTSRData = tsr.hasTSRData;
-            translation = tsr.translation;
-            scale = tsr.scale;
-            rotation = tsr.rotation;
-
-            boundaryTextures = tsr.boundaryTextures;
-        }
-
-        public Model Load()
-        {
-            return new Model(elements, binary.GetData<byte>());
-        }
-    }
-
     [Serializable]
     public enum DataType
     {
@@ -88,7 +32,8 @@ namespace Ply
         public int byte_size()
         {
             int bytes = 0;
-            for (var p = 0; p < properties.Length; p++) {
+            for (var p = 0; p < properties.Length; p++)
+            {
                 bytes += properties[p].byte_size();
             }
             return bytes;
@@ -118,7 +63,8 @@ namespace Ply
 
             element_views = new (string, ElementView)[elements.Length];
             var element_offset = 0;
-            for (var e = 0; e < element_views.Length; e++) {
+            for (var e = 0; e < element_views.Length; e++)
+            {
                 var element = elements[e];
 
                 var element_count = element.count;
@@ -127,7 +73,8 @@ namespace Ply
 
                 var property_offset = 0;
                 var property_views = new (string, int)[element.properties.Length];
-                for (var p = 0; p < property_views.Length; p++) {
+                for (var p = 0; p < property_views.Length; p++)
+                {
                     property_views[p] = (element.properties[p].name, property_offset);
                     property_offset += element.properties[p].byte_size();
                 }
@@ -140,8 +87,10 @@ namespace Ply
 
         public ElementView element_view(string element)
         {
-            for (var e = 0; e < element_views.Length; e++) {
-                if (element_views[e].Item1 == element) {
+            for (var e = 0; e < element_views.Length; e++)
+            {
+                if (element_views[e].Item1 == element)
+                {
                     return element_views[e].Item2;
                 }
             }
@@ -172,8 +121,10 @@ namespace Ply
         public PropertyView property_view(string property)
         {
             var offset = -1;
-            for (var i = 0; i < properties.Length; i++) {
-                if (properties[i].Item1 == property) {
+            for (var i = 0; i < properties.Length; i++)
+            {
+                if (properties[i].Item1 == property)
+                {
                     offset = properties[i].Item2;
                     break;
                 }
@@ -239,28 +190,146 @@ namespace Ply
         }
     }
 
-    // Added TSRData struct to hold the Translation, Scale, Rotation data
+    // Make TextureData serializable
+    [Serializable]
+    public class TextureData
+    {
+        // Unity can serialize a single-dimension array of bytes
+        public byte[] data;
+
+        public TextureData(byte[] data)
+        {
+            this.data = data;
+        }
+    }
+
+    public class PlyData : ScriptableObject
+    {
+        [SerializeField]
+        private Element[] elements;
+
+        [SerializeField]
+        private TextAsset binary;
+
+        [SerializeField]
+        private bool hasTSRData;
+
+        [SerializeField]
+        private Vector3 translation;
+
+        [SerializeField]
+        private Vector3 scale;
+
+        [SerializeField]
+        private Quaternion rotation;
+
+        // Replace byte[][] with a serializable array of TextureData objects
+        [SerializeField]
+        private TextureData[] boundaryTextureData;
+
+        [SerializeField]
+        private int textureResolution;
+
+        public Element[] Elements { get => elements; }
+        public TextAsset Binary { get => binary; }
+        public bool HasTSRData { get => hasTSRData; }
+        public Vector3 Translation { get => translation; }
+        public Vector3 Scale { get => scale; }
+        public Quaternion Rotation { get => rotation; }
+        public int TextureResolution { get => textureResolution; }
+
+        // Provide access to the texture data
+        public byte[] GetTextureData(int index)
+        {
+            if (boundaryTextureData != null && index >= 0 && index < boundaryTextureData.Length && boundaryTextureData[index] != null)
+            {
+                return boundaryTextureData[index].data;
+            }
+            return null;
+        }
+
+        public int TextureCount
+        {
+            get { return boundaryTextureData != null ? boundaryTextureData.Length : 0; }
+        }
+
+        public void ReadFromStream(FileStream stream)
+        {
+            var (header, read_count, tsr) = PlyDataParser.read_header(stream);
+            using var binary_data = PlyDataParser.read_binary_blob(stream, read_count, Allocator.Temp);
+            var binary_asset = new TextAsset(binary_data)
+            {
+                name = "binary_data"
+            };
+            elements = header;
+            binary = binary_asset;
+
+            // Store TSR data if available
+            hasTSRData = tsr.hasTSRData;
+            translation = tsr.translation;
+            scale = tsr.scale;
+            rotation = tsr.rotation;
+
+            // Store the texture resolution
+            textureResolution = tsr.textureResolution;
+
+            // Store raw texture data from the parser in serializable format
+            if (tsr.textureDataArray != null && tsr.textureDataArray.Length > 0)
+            {
+                boundaryTextureData = new TextureData[tsr.textureDataArray.Length];
+
+                for (int i = 0; i < tsr.textureDataArray.Length; i++)
+                {
+                    if (tsr.textureDataArray[i] != null)
+                    {
+                        boundaryTextureData[i] = new TextureData(tsr.textureDataArray[i]);
+                        Debug.Log($"Stored texture {i} data: {boundaryTextureData[i].data.Length} bytes");
+                    }
+                }
+
+                Debug.Log($"Stored {boundaryTextureData.Length} texture data arrays");
+            }
+            else
+            {
+                boundaryTextureData = null;
+            }
+
+#if UNITY_EDITOR
+            UnityEditor.EditorUtility.SetDirty(this);
+#endif
+        }
+
+        public Model Load()
+        {
+            return new Model(elements, binary.GetData<byte>());
+        }
+    }
+
+    // Updated TSRData to use byte arrays
     public struct TSRData
     {
         public bool hasTSRData;
         public Vector3 translation;
         public Vector3 scale;
         public Quaternion rotation;
-        public Texture2D[] boundaryTextures;
+        public byte[][] textureDataArray;
+        public int textureResolution;
 
         public TSRData(
             bool hasTSRData,
             Vector3 translation,
             Vector3 scale,
             Quaternion rotation,
-            Texture2D[] boundaryTextures
-)
+            byte[][] textureDataArray,
+            int textureResolution = 0
+        )
         {
             this.hasTSRData = hasTSRData;
             this.translation = translation;
             this.scale = scale;
             this.rotation = rotation;
-            this.boundaryTextures = boundaryTextures ?? new Texture2D[0];
+            this.textureDataArray = textureDataArray;
+            this.textureResolution = textureResolution;
         }
     }
 
@@ -277,7 +346,8 @@ namespace Ply
 
         private static HeaderLineKind line_kind_from_name(string name)
         {
-            return name switch {
+            return name switch
+            {
                 "element" => HeaderLineKind.Element,
                 "property" => HeaderLineKind.Property,
                 "comment" => HeaderLineKind.Comment,
@@ -288,7 +358,8 @@ namespace Ply
 
         public static DataType data_type_from_name(string name)
         {
-            return name switch {
+            return name switch
+            {
                 "float" => DataType.Float,
                 "uchar" => DataType.UChar,
                 "uint" => DataType.UInt,
@@ -298,7 +369,8 @@ namespace Ply
 
         public static int byte_size(this DataType data_type)
         {
-            return data_type switch {
+            return data_type switch
+            {
                 DataType.Float => 4,
                 DataType.UChar => 1,
                 DataType.UInt => 4,
@@ -343,100 +415,119 @@ namespace Ply
                     elements.Add(new Element { name = name, count = count, properties = properties.ToArray() });
             }
 
-            // For storing boundary textures
-            Dictionary<int, string> textureDataDict = new Dictionary<int, string>();
-            string texturePrefix = "";
+            // For storing boundary texture data as byte arrays
+            byte[][] textureDataArray = new byte[6][];
+            int resolution = 0;
 
-            for (int line = 0; line < MAX_HEADER_LINES; ++line) {
+            for (int line = 0; line < MAX_HEADER_LINES; ++line)
+            {
                 var col = read_next_line().Split();
                 var kind = line_kind_from_name(col[0]);
-                if (kind == HeaderLineKind.Element) {
+                if (kind == HeaderLineKind.Element)
+                {
                     add_current_element();
                     name = col[1];
                     count = Convert.ToInt32(col[2]);
                     properties.Clear();
-                } else if (kind == HeaderLineKind.Property) {
-                    properties.Add(new Property { name = col[2], data_type = data_type_from_name(col[1]) });                    
-                } else if (kind == HeaderLineKind.Comment) {
+                }
+                else if (kind == HeaderLineKind.Property)
+                {
+                    properties.Add(new Property { name = col[2], data_type = data_type_from_name(col[1]) });
+                }
+                else if (kind == HeaderLineKind.Comment)
+                {
                     // Parse comment lines for TSR data
-                    if (col.Length >= 3) {
+                    if (col.Length >= 3)
+                    {
                         // Check for Translation (center) data
-                        if (col[1] == "bb_center_x") {
+                        if (col[1] == "bb_center_x")
+                        {
                             hasTSRData = true;
                             translation.x = float.Parse(col[2]);
-                        } else if (col[1] == "bb_center_y") {
+                        }
+                        else if (col[1] == "bb_center_y")
+                        {
                             translation.y = float.Parse(col[2]);
-                        } else if (col[1] == "bb_center_z") {
+                        }
+                        else if (col[1] == "bb_center_z")
+                        {
                             translation.z = float.Parse(col[2]);
                         }
                         // Check for Scale (size) data
-                        else if (col[1] == "bb_size_x") {
+                        else if (col[1] == "bb_size_x")
+                        {
                             scale.x = float.Parse(col[2]);
-                        } else if (col[1] == "bb_size_y") {
+                        }
+                        else if (col[1] == "bb_size_y")
+                        {
                             scale.y = float.Parse(col[2]);
-                        } else if (col[1] == "bb_size_z") {
+                        }
+                        else if (col[1] == "bb_size_z")
+                        {
                             scale.z = float.Parse(col[2]);
                         }
                         // Check for Rotation data
-                        else if (col[1] == "bb_rotation_x") {
+                        else if (col[1] == "bb_rotation_x")
+                        {
                             rotation.x = float.Parse(col[2]);
-                        } else if (col[1] == "bb_rotation_y") {
+                        }
+                        else if (col[1] == "bb_rotation_y")
+                        {
                             rotation.y = float.Parse(col[2]);
-                        } else if (col[1] == "bb_rotation_z") {
+                        }
+                        else if (col[1] == "bb_rotation_z")
+                        {
                             rotation.z = float.Parse(col[2]);
-                        } else if (col[1] == "bb_rotation_w") {
+                        }
+                        else if (col[1] == "bb_rotation_w")
+                        {
                             rotation.w = float.Parse(col[2]);
-                        } else if (col[1] == "boundary_texture_prefix") {
-                            texturePrefix = col[2];
-                        } else if (col[1].StartsWith("boundary_texture_") && col[1].Contains("_data")) {
-                                // Extract texture index from boundary_texture_X_data
-                                string[] parts = col[1].Split('_');
-                                if (parts.Length >= 3 && int.TryParse(parts[2], out int textureIndex))
+                        }
+                        else if (col[1] == "boundary_texture_resolution")
+                        {
+                            resolution = int.Parse(col[2]);
+                            Debug.Log($"Found texture resolution: {resolution}");
+                        }
+                        else if (col[1].StartsWith("boundary_texture_") && col[1].Contains("_data"))
+                        {
+                            // Extract texture index from boundary_texture_X_data
+                            string[] parts = col[1].Split('_');
+                            if (parts.Length >= 3 && int.TryParse(parts[2], out int textureIndex))
+                            {
+                                try
                                 {
-                                    // Collect the base64 data
-                                    string textureData = col[2]; // Or join remaining columns if needed
-                                    textureDataDict[textureIndex] = textureData;
+                                    // Collect the base64 data directly as byte array
+                                    byte[] textureData = Convert.FromBase64String(col[2]);
+                                    Debug.Log($"Decoded texture {textureIndex} data: {textureData.Length} bytes");
+
+                                    // Store raw byte data directly
+                                    textureDataArray[textureIndex] = textureData;
                                 }
+                                catch (Exception e)
+                                {
+                                    Debug.LogError($"Error processing texture {textureIndex}: {e.Message}");
+                                }
+                            }
                         }
                     }
-                } else if (kind == HeaderLineKind.EndHeader) {
+                }
+                else if (kind == HeaderLineKind.EndHeader)
+                {
                     add_current_element();
                     break;
-                } 
-            }
-
-            // After the header parsing loop, before returning:
-            Texture2D[] textures = new Texture2D[6]; // Assuming 6 textures for cube faces
-
-            // Convert base64 data to textures
-            foreach (var pair in textureDataDict)
-            {
-                try
-                {
-                    int index = pair.Key;
-                    if (index >= 0 && index < 6)
-                    {
-                        byte[] textureBytes = Convert.FromBase64String(pair.Value);
-                        Texture2D texture = new Texture2D(2, 2);
-                        texture.LoadImage(textureBytes);
-                        textures[index] = texture;
-                    }
-                }
-                catch (Exception e)
-                {
-                    Debug.LogWarning($"Failed to decode texture {pair.Key}: {e.Message}");
                 }
             }
 
             // Create a TSRData struct to return with the header information
             TSRData tsrData = new TSRData(
-                hasTSRData, 
-                translation, 
-                scale, 
+                hasTSRData,
+                translation,
+                scale,
                 rotation,
-                textures
+                textureDataArray,
+                resolution
             );
-            
+
             return (elements.ToArray(), read_count, tsrData);
         }
 
@@ -444,7 +535,8 @@ namespace Ply
         {
             stream.Seek(binary_offset, SeekOrigin.Begin);
             var buffer = new NativeArray<byte>((int)stream.Length - binary_offset, alloc, NativeArrayOptions.UninitializedMemory);
-            if (stream.Read(buffer) != buffer.Length) {
+            if (stream.Read(buffer) != buffer.Length)
+            {
                 buffer.Dispose();
                 throw new IOException("Incomplete binary read.");
             }

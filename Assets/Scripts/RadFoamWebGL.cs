@@ -10,12 +10,13 @@ public class RadFoamWebGL : MonoBehaviour
     public PlyData Data;
     public float fisheye_fov = 60;
     public Transform Target;
-    
+
     [Tooltip("Override the bounding box settings from the PLY file")]
     public bool overrideBoundingBox = false;
     public Vector3 boundingBoxCenter = Vector3.zero;
     public Vector3 boundingBoxSize = Vector3.one;
     public Quaternion boundingBoxRotation = Quaternion.identity;
+    public Texture2DArray boundaryTextureArray; // Keep this for manual override
 
     private Material blitMat;
     private Texture2D positions_tex;
@@ -23,13 +24,13 @@ public class RadFoamWebGL : MonoBehaviour
     private Texture2D adjacency_tex;
     private Texture2D adjacency_diff_tex;
     private NativeArray<float4> points; // store this for finding the closest cell to the camera on the CPU
+    private Texture2DArray _BoundaryTextureArray;
 
     private bool _HasBoundingBox = false;
     private Vector3 _BoundingBoxCenter = Vector3.zero;
     private Vector3 _BoundingBoxSize = Vector3.one;
     private Quaternion _BoundingBoxRotation = Quaternion.identity;
-    private Texture2D[] boundaryTextures;
-    private bool hasBoundaryTextures = false;
+    private bool _CreatedBoundaryTextureArray = false;
 
     void Start()
     {
@@ -42,6 +43,13 @@ public class RadFoamWebGL : MonoBehaviour
         if (points.IsCreated)
             points.Dispose();
         Destroy(blitMat);
+
+        // Clean up textures we created
+        if (_CreatedBoundaryTextureArray && _BoundaryTextureArray != null)
+        {
+            Destroy(_BoundaryTextureArray);
+            _BoundaryTextureArray = null;
+        }
     }
 
     void Update()
@@ -53,7 +61,7 @@ public class RadFoamWebGL : MonoBehaviour
     {
         // First, check if the PlyData has TSR information
         InitializeBoundingBox();
-        
+
         using var model = Data.Load();
 
         var vertex_element = model.element_view("vertex");
@@ -72,7 +80,8 @@ public class RadFoamWebGL : MonoBehaviour
         // filling buffers one after the other, to ensure we don't run out of memory on webgl
         {
             using var attributes = new NativeArray<half4>(vertex_tex_size, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
-            new FillColorDataJob {
+            new FillColorDataJob
+            {
                 r = vertex_element.property_view("red"),
                 g = vertex_element.property_view("green"),
                 b = vertex_element.property_view("blue"),
@@ -86,7 +95,8 @@ public class RadFoamWebGL : MonoBehaviour
         }
 
         points = new NativeArray<float4>(vertex_tex_size, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
-        var points_handle = new FillPointsDataJob {
+        var points_handle = new FillPointsDataJob
+        {
             x = vertex_element.property_view("x"),
             y = vertex_element.property_view("y"),
             z = vertex_element.property_view("z"),
@@ -95,7 +105,8 @@ public class RadFoamWebGL : MonoBehaviour
         }.Schedule(vertex_count, 512);
 
         using var adjacency = new NativeArray<uint>(adj_tex_size, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
-        var adjacency_handle = new ReadUintJob {
+        var adjacency_handle = new ReadUintJob
+        {
             view = adjacency_element.property_view("adjacency"),
             target = adjacency
         }.Schedule(adjacency_count, 512);
@@ -121,7 +132,7 @@ public class RadFoamWebGL : MonoBehaviour
         adjacency_tex.SetPixelData(adjacency, 0, 0);
         adjacency_tex.Apply(false, true);
     }
-    
+
     void InitializeBoundingBox()
     {
         // If we're overriding the bounding box settings from the inspector, use those
@@ -131,6 +142,8 @@ public class RadFoamWebGL : MonoBehaviour
             _BoundingBoxCenter = boundingBoxCenter;
             _BoundingBoxSize = boundingBoxSize;
             _BoundingBoxRotation = boundingBoxRotation;
+            _BoundaryTextureArray = boundaryTextureArray;
+
             Debug.Log("Using manual bounding box settings");
         }
         // Otherwise, check if the PlyData has TSR information
@@ -140,6 +153,102 @@ public class RadFoamWebGL : MonoBehaviour
             _BoundingBoxCenter = Data.Translation;
             _BoundingBoxSize = Data.Scale;
             _BoundingBoxRotation = Data.Rotation;
+
+            // Handle boundary textures from raw byte data
+            // Since we don't have direct access to BoundaryTextureData, 
+            // we need to modify this approach
+
+            int textureResolution = 0;
+
+            // Assuming TextureResolution is accessible
+            if (Data.GetType().GetProperty("TextureResolution") != null)
+            {
+                textureResolution = (int)Data.GetType().GetProperty("TextureResolution").GetValue(Data, null);
+            }
+            else
+            {
+                // Default resolution if not available
+                textureResolution = 512;
+                Debug.LogWarning("Could not access TextureResolution property, using default 512");
+            }
+
+            // Check if there's a method to get texture data
+            var getTextureDataMethod = Data.GetType().GetMethod("GetTextureData");
+            if (getTextureDataMethod != null && textureResolution > 0)
+            {
+                bool hasValidTextures = false;
+
+                // Create texture array
+                _BoundaryTextureArray = new Texture2DArray(textureResolution, textureResolution, 6, TextureFormat.RGBA32, false);
+                _BoundaryTextureArray.name = "BoundaryTextureArray";
+                _BoundaryTextureArray.filterMode = FilterMode.Point;
+                _CreatedBoundaryTextureArray = true;
+
+                // Try to access texture count
+                var textureCountProperty = Data.GetType().GetProperty("TextureCount");
+                int textureCount = textureCountProperty != null ?
+                    (int)textureCountProperty.GetValue(Data, null) : 6;
+
+                for (int i = 0; i < textureCount && i < 6; i++)
+                {
+                    try
+                    {
+                        // Try to get texture data using reflection
+                        byte[] textureData = (byte[])getTextureDataMethod.Invoke(Data, new object[] { i });
+
+                        if (textureData != null && textureData.Length > 0)
+                        {
+                            // Create a temporary RenderTexture
+                            RenderTexture tempRT = RenderTexture.GetTemporary(textureResolution, textureResolution, 0, RenderTextureFormat.ARGB32);
+
+                            // Create a temporary texture just for loading the PNG data
+                            Texture2D tempTex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                            tempTex.LoadImage(textureData);
+
+                            // Blit to the temporary RT
+                            Graphics.Blit(tempTex, tempRT);
+
+                            // Copy from RT to the array slice
+                            RenderTexture prevRT = RenderTexture.active;
+                            RenderTexture.active = tempRT;
+
+                            Texture2D sliceTex = new Texture2D(textureResolution, textureResolution, TextureFormat.RGBA32, false);
+                            sliceTex.ReadPixels(new Rect(0, 0, textureResolution, textureResolution), 0, 0);
+                            sliceTex.Apply();
+
+                            RenderTexture.active = prevRT;
+
+                            // Copy to the texture array
+                            Graphics.CopyTexture(sliceTex, 0, 0, _BoundaryTextureArray, i, 0);
+
+                            // Clean up temporary objects
+                            RenderTexture.ReleaseTemporary(tempRT);
+                            Destroy(tempTex);
+                            Destroy(sliceTex);
+
+                            hasValidTextures = true;
+                            Debug.Log($"Loaded texture for face {i} from byte data ({textureData.Length} bytes)");
+                        }
+                    }
+                    catch (System.Exception e)
+                    {
+                        Debug.LogError($"Error loading texture {i}: {e.Message}");
+                    }
+                }
+
+                if (!hasValidTextures)
+                {
+                    Destroy(_BoundaryTextureArray);
+                    _BoundaryTextureArray = null;
+                    _CreatedBoundaryTextureArray = false;
+                    Debug.LogWarning("No valid textures found in PlyData");
+                }
+                else
+                {
+                    Debug.Log($"Created boundary texture array with valid textures");
+                }
+            }
+
             Debug.Log($"Using bounding box from PLY file: Center={_BoundingBoxCenter}, Size={_BoundingBoxSize}");
         }
         else
@@ -147,7 +256,7 @@ public class RadFoamWebGL : MonoBehaviour
             _HasBoundingBox = false;
             Debug.Log("No bounding box information available");
         }
-        
+
         // For debugging, show bounding box settings in editor view
         if (_HasBoundingBox)
         {
@@ -156,34 +265,27 @@ public class RadFoamWebGL : MonoBehaviour
             boundingBoxSize = _BoundingBoxSize;
             boundingBoxRotation = _BoundingBoxRotation;
         }
-
-        // Check for boundary textures
-        if (Data != null && Data.BoundaryTextures != null && Data.BoundaryTextures.Length > 0)
-        {
-            boundaryTextures = Data.BoundaryTextures;
-            hasBoundaryTextures = true;
-            Debug.Log($"Found {boundaryTextures.Length} boundary textures in PLY data");
-        }
-        else
-        {
-            hasBoundaryTextures = false;
-            Debug.Log("No boundary textures available");
-        }
     }
-    
+
     void OnGUI()
     {
         // Show FOV info
         GUI.Label(new Rect(10, 50, 200, 30), $"FOV: {fisheye_fov}° (Scroll to adjust)");
-        
+
         // Show bounding box info if available
         if (_HasBoundingBox)
         {
             GUI.Label(new Rect(10, 80, 300, 30), $"Bounding Box: {(_HasBoundingBox ? "Active" : "Inactive")}");
+
+            // Show texture info
+            if (_BoundaryTextureArray != null)
+            {
+                GUI.Label(new Rect(10, 110, 300, 30), $"Boundary Texture Array: {_BoundaryTextureArray.depth} slices");
+            }
         }
     }
-    
-    #if UNITY_EDITOR
+
+#if UNITY_EDITOR
     void OnDrawGizmos()
     {
         // Draw bounding box in the editor for visualization
@@ -207,11 +309,12 @@ public class RadFoamWebGL : MonoBehaviour
             Gizmos.matrix = oldMatrix;
         }
     }
-    #endif
+#endif
 
     void OnRenderImage(RenderTexture srcRenderTex, RenderTexture outRenderTex)
     {
-        if (points.Length == 0) {
+        if (points.Length == 0)
+        {
             Graphics.Blit(srcRenderTex, outRenderTex);
             return;
         }
@@ -234,21 +337,21 @@ public class RadFoamWebGL : MonoBehaviour
 
             // Set bounding box TSR data if available
             blitMat.SetInt("_HasBoundingBox", _HasBoundingBox ? 1 : 0);
-            
+
             if (_HasBoundingBox)
             {
                 // Set individual TSR components
                 blitMat.SetVector("_BoundingBoxCenter", _BoundingBoxCenter);
                 blitMat.SetVector("_BoundingBoxSize", _BoundingBoxSize);
-                
+
                 // Set rotation as a matrix for easier use in shader
                 Matrix4x4 rotationMatrix = Matrix4x4.Rotate(_BoundingBoxRotation);
                 blitMat.SetMatrix("_BoundingBoxRotation", rotationMatrix);
-                
+
                 // Combined TRS matrix and its inverse for ray intersection calculations
                 Matrix4x4 boundingBoxMatrix = Matrix4x4.TRS(_BoundingBoxCenter, _BoundingBoxRotation, Vector3.one);
                 Matrix4x4 invBoundingBoxMatrix = boundingBoxMatrix.inverse;
-                
+
                 blitMat.SetMatrix("_BoundingBoxTRS", boundingBoxMatrix);
                 blitMat.SetMatrix("_InvBoundingBoxTRS", invBoundingBoxMatrix);
             }
@@ -259,18 +362,12 @@ public class RadFoamWebGL : MonoBehaviour
             blitMat.SetTexture("_attr_tex", attr_tex);
 
             blitMat.SetInt("_NumCells", points.Length);
-            
-            if (hasBoundaryTextures && boundaryTextures != null)
+
+            // Check if we have valid boundary textures to set
+            if (_HasBoundingBox && _BoundaryTextureArray != null)
             {
+                blitMat.SetTexture("_BoundaryTextureArray", _BoundaryTextureArray);
                 blitMat.SetInt("_HasBoundaryTextures", 1);
-                for (int i = 0; i < boundaryTextures.Length && i < 6; i++)
-                {
-                    if (boundaryTextures[i] != null)
-                    {
-                        // Set each face texture (+X, -X, +Y, -Y, +Z, -Z)
-                        blitMat.SetTexture($"_BoundaryTexture{i}", boundaryTextures[i]);
-                    }
-                }
             }
             else
             {
@@ -349,7 +446,8 @@ public class RadFoamWebGL : MonoBehaviour
             int adj_from = (int)(index > 0 ? math.asuint(positions[index - 1].w) : 0);
             int adj_to = (int)math.asuint(cell_data.w);
 
-            for (int a = adj_from; a < adj_to; a++) {
+            for (int a = adj_from; a < adj_to; a++)
+            {
                 int adj = (int)adjacency[a];
                 float3 adj_pos = positions[adj].xyz;
                 float3 adj_diff = adj_pos - cell_data.xyz;
@@ -370,10 +468,12 @@ public class RadFoamWebGL : MonoBehaviour
         {
             var closest_dist = float.MaxValue;
             var closest_index = 0;
-            for (var i = 0; i < positions.Length; i++) {
+            for (var i = 0; i < positions.Length; i++)
+            {
                 float4 cell_data = positions[i];
                 var dist = math.distancesq(cell_data.xyz, target);
-                if (dist < closest_dist) {
+                if (dist < closest_dist)
+                {
                     closest_dist = dist;
                     closest_index = i;
                 }

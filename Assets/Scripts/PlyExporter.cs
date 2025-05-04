@@ -23,7 +23,7 @@ namespace Ply
                 return false;
             }
 
-            int resolution = 4096;
+            const int resolution = 4096;
 
             try
             {
@@ -239,8 +239,7 @@ namespace Ply
                             writer.Write(System.Text.Encoding.ASCII.GetBytes($"comment bb_rotation_w {boundingBoxRotation.w}\n"));
                             
                             // Add comment for boundary texture files
-                            string texturePrefix = Path.GetFileNameWithoutExtension(path);
-                            writer.Write(System.Text.Encoding.ASCII.GetBytes($"comment boundary_texture_prefix {texturePrefix}\n"));
+                            writer.Write(System.Text.Encoding.ASCII.GetBytes($"comment boundary_texture_resolution {resolution.ToString()}\n"));
                         }
                         
                         // Write vertex element
@@ -266,7 +265,34 @@ namespace Ply
                             writer.Write(System.Text.Encoding.ASCII.GetBytes($"element adjacency {newAdjacencyData.Count}\n"));
                             writer.Write(System.Text.Encoding.ASCII.GetBytes("property uint adjacency\n"));
                         }
-                        
+
+                        // Additionally encode the texture data directly in the PLY
+                        for (int i = 0; i < boundaryTextures.Length; i++)
+                        {
+                            string texturePrefix = Path.GetFileNameWithoutExtension(path);
+                            string textureFilePath = $"{Path.GetDirectoryName(path)}/pre_boundary_{i}.png";
+                            File.WriteAllBytes(textureFilePath, boundaryTextures[i].EncodeToPNG());
+                            Debug.Log($"Saved boundary texture {i} to {textureFilePath}");
+
+                            // Remap underlying boundary textures to new scheme
+                            boundaryTextures[i] = BoundaryTextureGenerator.RemapBoundaryTexture(
+                                boundaryTextures[i],
+                                oldToNewIndex,
+                                resolution
+                            );
+
+                            textureFilePath = $"{Path.GetDirectoryName(path)}/post_boundary_{i}.png";
+                            File.WriteAllBytes(textureFilePath, boundaryTextures[i].EncodeToPNG());
+                            Debug.Log($"Saved boundary texture {i} to {textureFilePath}");
+
+                            // Convert texture to bytes
+                            byte[] textureBytes = boundaryTextures[i].EncodeToPNG();
+
+                            // Encode as Base64 string and write to file as comment
+                            string textureData = Convert.ToBase64String(textureBytes);
+                            writer.Write(System.Text.Encoding.ASCII.GetBytes($"comment boundary_texture_{i}_data {textureData}\n"));
+                        }
+
                         writer.Write(System.Text.Encoding.ASCII.GetBytes("end_header\n"));
                         
                         // Write vertex data
@@ -322,24 +348,6 @@ namespace Ply
                             {
                                 writer.Write(adj);
                             }
-                        }
-
-                        // Additionally encode the texture data directly in the PLY
-                        for (int i = 0; i < boundaryTextures.Length; i++)
-                        {
-                            // Remap underlying boundary textures to new scheme
-                            boundaryTextures[i] = BoundaryTextureGenerator.RemapBoundaryTexture(
-                                boundaryTextures[i],
-                                oldToNewIndex,
-                                resolution
-                            );
-
-                            // Convert texture to bytes
-                            byte[] textureBytes = boundaryTextures[i].EncodeToPNG();
-                            
-                            // Encode as Base64 string and write to file as comment
-                            string textureData = Convert.ToBase64String(textureBytes);
-                            writer.Write(System.Text.Encoding.ASCII.GetBytes($"comment boundary_texture_{i}_data {textureData}\n"));
                         }
                     }
                     

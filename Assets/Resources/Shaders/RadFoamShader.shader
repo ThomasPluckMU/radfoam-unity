@@ -12,7 +12,6 @@ Shader "Hidden/Custom/RadFoamShader"
         ZWrite Off
         ZTest Always
 
-
         Pass
         {
             CGPROGRAM
@@ -68,14 +67,10 @@ Shader "Hidden/Custom/RadFoamShader"
             float4x4 _BoundingBoxTRS;
             float4x4 _InvBoundingBoxTRS;
             
-            // Boundary textures
+            // Changed from individual textures to a texture array
             int _HasBoundaryTextures;
-            sampler2D _BoundaryTexture0; // +X
-            sampler2D _BoundaryTexture1; // -X
-            sampler2D _BoundaryTexture2; // +Y
-            sampler2D _BoundaryTexture3; // -Y
-            sampler2D _BoundaryTexture4; // +Z
-            sampler2D _BoundaryTexture5; // -Z
+            Texture2DArray _BoundaryTextureArray;
+            SamplerState sampler_BoundaryTextureArray;
             
             float2 index_to_tex_buffer(uint i, float2 texel_size, uint width) {
                 uint y = i / width;
@@ -99,11 +94,10 @@ Shader "Hidden/Custom/RadFoamShader"
                 return tex2Dlod(_adjacency_diff_tex, float4(index_to_tex_buffer(i, _adjacency_tex_TexelSize.xy, 4096), 0, 0)).xyz;
             }
 
-            // Sample the boundary texture based on world position and face index
+            // Updated to use texture array
             float4 SampleBoundaryTexture(float3 worldPos, int faceIndex) {
                 // Transform point to local box space
                 float3 localPos = mul(_InvBoundingBoxTRS, float4(worldPos, 1.0)).xyz;
-                
                 // Normalize to 0-1 range within the box
                 float3 normalizedPos = (localPos / _BoundingBoxSize) + 0.5;
                 
@@ -112,25 +106,26 @@ Shader "Hidden/Custom/RadFoamShader"
                 switch(faceIndex) {
                     case 0: // +X face
                         uv = float2(normalizedPos.z, normalizedPos.y);
-                        return tex2D(_BoundaryTexture0, uv);
+                        break;
                     case 1: // -X face
                         uv = float2(1.0 - normalizedPos.z, normalizedPos.y);
-                        return tex2D(_BoundaryTexture1, uv);
+                        break;
                     case 2: // +Y face
                         uv = float2(normalizedPos.x, normalizedPos.z);
-                        return tex2D(_BoundaryTexture2, uv);
+                        break;
                     case 3: // -Y face
                         uv = float2(normalizedPos.x, 1.0 - normalizedPos.z);
-                        return tex2D(_BoundaryTexture3, uv);
+                        break;
                     case 4: // +Z face
                         uv = float2(normalizedPos.x, normalizedPos.y);
-                        return tex2D(_BoundaryTexture4, uv);
+                        break;
                     case 5: // -Z face
                         uv = float2(1.0 - normalizedPos.x, normalizedPos.y);
-                        return tex2D(_BoundaryTexture5, uv);
-                    default:
-                        return float4(0, 0, 0, 0);
+                        break;
                 }
+                
+                // Sample from texture array using computed UV and face index
+                return _BoundaryTextureArray.Sample(sampler_BoundaryTextureArray, float3(uv, faceIndex));
             }
             
             // Determine which face of the bounding box was hit (0-5 for +X, -X, +Y, -Y, +Z, -Z)
@@ -155,8 +150,8 @@ Shader "Hidden/Custom/RadFoamShader"
                 uint g = uint(color.g * 255) << 8;
                 uint b = uint(color.b * 255);
                 return r | g | b;
-            }            
-
+            }
+            
             blit_v2f blitvert(blit_data v)
             {
                 blit_v2f o;
@@ -281,12 +276,10 @@ Shader "Hidden/Custom/RadFoamShader"
                             
                             // Get face index
                             int faceIndex = GetHitFace(localHitPos, localNormal);
-                            
-                            // Look up cell index from boundary texture
+                            // Look up cell index from boundary texture array
                             float4 boundaryData = SampleBoundaryTexture(hitPos, faceIndex);
                             // Extract cell index from texture (stored in the R channel as a normalized float)
                             cell = DecodeIndexFromColor(boundaryData);
-
                         } else {
                             // If no boundary textures, fall back to closest cell
                             cell = _start_index;

@@ -119,61 +119,6 @@ NavMeshSettings:
     debug:
       m_Flags: 0
   m_NavMeshData: {fileID: 0}
---- !u!1 &84317454
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 84317456}
-  - component: {fileID: 84317455}
-  m_Layer: 0
-  m_Name: Blueberry Proxy
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 1
---- !u!114 &84317455
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 84317454}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: befc8c52c756dda4f82d0130bdbd0404, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  sourceData: {fileID: -4966213957662602761, guid: deb4ded3e05bbb640ae4ec69d4e56e4c, type: 3}
-  visualScale: 0.024
-  persistInScene: 0
-  maxPointsToRender: 50000
-  selectedPointIndices: 
-  hiddenPointIndices: 
-  useBoundingBoxFilter: 1
-  boundingBoxCenter: {x: -0.49, y: 2.34, z: 1.8}
-  boundingBoxSize: {x: 4.3221, y: 5.076955, z: 4.3015}
-  boundingBoxRotation: {x: 0.3656285, y: -0.02905259, z: 0.07368932, w: 0.9273843}
-  boundingBoxHandle: {fileID: 0}
---- !u!4 &84317456
-Transform:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 84317454}
-  serializedVersion: 2
-  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 1, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
-  m_Children: []
-  m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &330585543
 GameObject:
   m_ObjectHideFlags: 0
@@ -299,9 +244,69 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 81dacdeec5c9b30458012843f2f454fd, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  Data: {fileID: -4966213957662602761, guid: 521648a39af641547bcf29e9d3aea7b2, type: 3}
+  Data: {fileID: -4966213957662602761, guid: f5b6b4d9d5ccd674e9e82bd39f6cd62b, type: 3}
   fisheye_fov: 60
   Target: {fileID: 617752957}
+  overrideBoundingBox: 0
+  boundingBoxCenter: {x: 0, y: 0, z: 0}
+  boundingBoxSize: {x: 1, y: 1, z: 1}
+  boundingBoxRotation: {x: 0, y: 0, z: 0, w: 1}
+  boundaryTextureArray: {fileID: 0}
+--- !u!1 &371860298
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 371860300}
+  - component: {fileID: 371860299}
+  m_Layer: 0
+  m_Name: PLY Scene Proxy
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &371860299
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 371860298}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: befc8c52c756dda4f82d0130bdbd0404, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  sourceData: {fileID: -4966213957662602761, guid: 53cd5350dae217a42bb19cfd7b43add6, type: 3}
+  visualScale: 0.05
+  persistInScene: 1
+  maxPointsToRender: 10000
+  selectedPointIndices: 
+  hiddenPointIndices: 
+  useBoundingBoxFilter: 1
+  boundingBoxCenter: {x: 0, y: 0, z: 0}
+  boundingBoxSize: {x: 5.0382, y: 10, z: 4.334}
+  boundingBoxRotation: {x: 0, y: 0, z: 0, w: 1}
+  boundingBoxHandle: {fileID: 0}
+--- !u!4 &371860300
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 371860298}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &617752956
 GameObject:
   m_ObjectHideFlags: 0
@@ -364,61 +369,6 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!1 &1076498393
-GameObject:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  serializedVersion: 6
-  m_Component:
-  - component: {fileID: 1076498395}
-  - component: {fileID: 1076498394}
-  m_Layer: 0
-  m_Name: Oat Proxy
-  m_TagString: Untagged
-  m_Icon: {fileID: 0}
-  m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
-  m_IsActive: 1
---- !u!114 &1076498394
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1076498393}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: befc8c52c756dda4f82d0130bdbd0404, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  sourceData: {fileID: -4966213957662602761, guid: 5f032ba6e6acb72408a80a4943fb15e9, type: 3}
-  visualScale: 0.0205
-  persistInScene: 0
-  maxPointsToRender: 50000
-  selectedPointIndices: 
-  hiddenPointIndices: 
-  useBoundingBoxFilter: 1
-  boundingBoxCenter: {x: 0.6, y: 2.43, z: -0.37}
-  boundingBoxSize: {x: 1.7433727, y: 4.5711637, z: 1.8154486}
-  boundingBoxRotation: {x: -0.13622244, y: -0.34499788, z: 0.10085925, w: 0.9231725}
-  boundingBoxHandle: {fileID: 0}
---- !u!4 &1076498395
-Transform:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 1076498393}
-  serializedVersion: 2
-  m_LocalRotation: {x: 0.0011391644, y: -0, z: -0, w: 0.99999934}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 1, y: 1, z: 1}
-  m_ConstrainProportionsScale: 0
-  m_Children: []
-  m_Father: {fileID: 0}
-  m_LocalEulerAnglesHint: {x: 0.131, y: 0, z: 0}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
@@ -426,5 +376,4 @@ SceneRoots:
   - {fileID: 330585546}
   - {fileID: 617752957}
   - {fileID: 726662152}
-  - {fileID: 1076498395}
-  - {fileID: 84317456}
+  - {fileID: 371860300}
