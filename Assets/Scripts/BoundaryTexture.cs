@@ -1,183 +1,372 @@
 using UnityEngine;
-using System.Collections.Generic;
+using Unity.Collections;
+using Unity.Jobs;
+using Unity.Mathematics;
+using Unity.Burst;
 using System;
+using System.Collections.Generic;
 
 namespace Ply
 {
     public static class BoundaryTextureGenerator
     {
         /// <summary>
-        /// Generates a 2D Voronoi texture for a given face of the bounding box
+        /// Generates a Voronoi boundary texture for a given face of the 
+        /// bounding box using a scanline approach, measuring distances to actual 3D centroids
         /// </summary>
-        /// <param name="plyData">Source PLY data containing the Voronoi foam</param>
-        /// <param name="boundingBoxFace">Which face of the bounding box (0-5 for +X, -X, +Y, -Y, +Z, -Z)</param>
-        /// <param name="resolution">Texture resolution (width/height in pixels)</param>
-        /// <param name="boundingBoxCenter">Center position of the bounding box</param>
-        /// <param name="boundingBoxSize">Size of the bounding box</param>
-        /// <param name="boundingBoxRotation">Rotation of the bounding box</param>
-        /// <param name="progressCallback">Optional callback for reporting progress</param>
-        /// <returns>Generated texture containing cell IDs at each pixel</returns>
-        public static Texture2D GenerateBoundaryTexture(
-            PlyData plyData,
+        public static (Texture2D, HashSet<int>) GenerateBoundaryTexture(
+            PlyData sourceData,
             int boundingBoxFace,
-            int resolution,
             Vector3 boundingBoxCenter,
             Vector3 boundingBoxSize,
             Quaternion boundingBoxRotation,
+            int resolution = 1024,
             Action<float, string> progressCallback = null)
         {
             ReportProgress(progressCallback, 0f, "Loading PLY data...");
+
+            HashSet<int> boundary_cells = new HashSet<int>();
             
-            using (Model model = plyData.Load())
+            using var model = sourceData.Load();
+
+            // Get vertex and adjacency elements
+            var vertex_element = model.element_view("vertex");
+            var adjacency_element = model.element_view("adjacency");
+            int vertex_count = vertex_element.count;
+            int adjacency_count = adjacency_element.count;
+            
+            ReportProgress(progressCallback, 0.1f, "Setting up boundary plane...");
+            
+            // Define the face plane in local space of the bounding box
+            Vector3 planeNormal = GetFaceNormal(boundingBoxFace);
+            Vector3 planePoint = Vector3.Scale(planeNormal, boundingBoxSize * 0.5f);
+            
+            // Transform to world space
+            Matrix4x4 localToWorld = Matrix4x4.TRS(boundingBoxCenter, boundingBoxRotation, Vector3.one);
+            Vector3 worldPlaneNormal = localToWorld.MultiplyVector(planeNormal).normalized;
+            Vector3 worldPlanePoint = localToWorld.MultiplyPoint3x4(planePoint);
+            
+            // Get face axes for mapping 3D to 2D
+            GetFaceAxes(boundingBoxFace, out Vector3 uAxis, out Vector3 vAxis);
+            uAxis = localToWorld.MultiplyVector(uAxis);
+            vAxis = localToWorld.MultiplyVector(vAxis);
+            
+            ReportProgress(progressCallback, 0.2f, "Loading vertex data...");
+            
+            // Load vertex positions and adjacency offsets
+            var points = new NativeArray<float4>(vertex_count, Allocator.TempJob);
+            var pointsJobHandle = new FillPointsDataJob {
+                x = vertex_element.property_view("x"),
+                y = vertex_element.property_view("y"),
+                z = vertex_element.property_view("z"),
+                adj_offset = vertex_element.property_view("adjacency_offset"),
+                points = points
+            }.Schedule(vertex_count, 64);
+            
+            // Load adjacency data
+            var adjacency = new NativeArray<uint>(adjacency_count, Allocator.TempJob);
+            var adjacencyJobHandle = new ReadUintJob {
+                view = adjacency_element.property_view("adjacency"),
+                target = adjacency
+            }.Schedule(adjacency_count, 64);
+            
+            // Wait for data loading to complete
+            JobHandle.CompleteAll(ref pointsJobHandle, ref adjacencyJobHandle);
+                        
+            // Identify valid centroids (those not excluded and within culling distance)
+            var positions3D = new NativeArray<float3>(vertex_count, Allocator.TempJob);
+            
+            for (int i = 0; i < vertex_count; i++)
             {
-                // Get vertex element and property views
-                ElementView vertexView = model.element_view("vertex");
-                PropertyView xView = vertexView.property_view("x");
-                PropertyView yView = vertexView.property_view("y");
-                PropertyView zView = vertexView.property_view("z");
+                // Get vertex position
+                float4 point = points[i];
+                Vector3 position = new Vector3(point.x, point.y, point.z);
                 
-                int totalVertices = vertexView.count;
+                // Store 3D position for distance calculations
+                positions3D[i] = new float3(position.x, position.y, position.z);
+            }
+    
+            // Create texture data array
+            var textureData = new NativeArray<int>(resolution * resolution, Allocator.TempJob);
+            
+            ReportProgress(progressCallback, 0.5f, "Finding seed point and initializing first column...");
+            
+            // Create plane equation for pixel-to-world projection
+            float4 planeEquation = new float4(
+                worldPlaneNormal.x,
+                worldPlaneNormal.y,
+                worldPlaneNormal.z,
+                -Vector3.Dot(worldPlaneNormal, worldPlanePoint)
+            );
+            
+            // Find seed point (top-left corner) - this is the only exhaustive search
+            int seedCellId = -1;
+            float closestDistSq = float.MaxValue;
+            
+            // Calculate world position of top-left UV point
+            float2 uvCorner = new float2(0, 0); // Top-left in UV is (0,0)
+            Vector3 worldPos = WorldPositionFromUV(uvCorner, worldPlanePoint, uAxis, vAxis, boundingBoxSize);
+            
+            for (int i = 0; i < vertex_count; i++)
+            {
+                float3 pos = positions3D[i];
+                float distSq = math.distancesq(worldPos, pos);
                 
-                // Get adjacency data if available
-                ElementView adjacencyElement;
-                PropertyView adjacencyView;
-                PropertyView offsetView;
-                bool hasAdjacency = false;
-                
-                try
+                if (distSq < closestDistSq)
                 {
-                    adjacencyElement = model.element_view("adjacency");
-                    adjacencyView = adjacencyElement.property_view("adjacency");
-                    offsetView = vertexView.property_view("adjacency_offset");
-                    hasAdjacency = true;
+                    closestDistSq = distSq;
+                    seedCellId = i;
                 }
-                catch (ArgumentException)
+            }
+            
+            // Initialize first column using adjacency data
+            textureData[0] = seedCellId; // Top-left corner
+            
+            for (int y = 1; y < resolution; y++)
+            {
+                int pixelIndex = y * resolution;
+                int prevPixelIndex = (y - 1) * resolution;
+                int prevCellId = textureData[prevPixelIndex];
+                
+                // Calculate world position of the current pixel
+                float2 pixelUV = new float2(0, y / (float)(resolution - 1));
+                Vector3 pixelWorldPos = WorldPositionFromUV(pixelUV, worldPlanePoint, uAxis, vAxis, boundingBoxSize);
+                float3 pixelPos = new float3(pixelWorldPos.x, pixelWorldPos.y, pixelWorldPos.z);
+                
+                // Start with the cell from above
+                int closestCellId = prevCellId;
+                closestDistSq = float.MaxValue;
+                
+                if (prevCellId >= 0 && prevCellId < points.Length)
                 {
-                    Debug.LogWarning("No adjacency data found in PLY, texture generation may be less accurate");
-                }
-                
-                ReportProgress(progressCallback, 0.1f, "Determining face plane...");
-                
-                // Define the face plane in local space of the bounding box
-                Vector3 planeNormal = GetFaceNormal(boundingBoxFace);
-                Vector3 planePoint = Vector3.Scale(planeNormal, boundingBoxSize * 0.5f);
-                
-                // Transform to world space
-                Matrix4x4 localToWorld = Matrix4x4.TRS(boundingBoxCenter, boundingBoxRotation, Vector3.one);
-                Matrix4x4 worldToLocal = localToWorld.inverse;
-                
-                Vector3 worldPlaneNormal = localToWorld.MultiplyVector(planeNormal).normalized;
-                Vector3 worldPlanePoint = localToWorld.MultiplyPoint3x4(planePoint);
-                
-                ReportProgress(progressCallback, 0.2f, "Culling non-relevant centroids...");
-                
-                // Find centroids that could influence the boundary
-                List<int> relevantCentroids = new List<int>();
-                List<Vector3> relevantPositions = new List<Vector3>();
-                Dictionary<int, int> oldToNewIndex = new Dictionary<int, int>();
-                
-                // Centroid culling distance - only consider cells whose centroids are 
-                // within this distance from the plane (using adjacency info to refine)
-                float cullingDistance = Mathf.Max(boundingBoxSize.x, boundingBoxSize.y, boundingBoxSize.z) * 0.2f;
-                
-                for (int i = 0; i < totalVertices; i++)
-                {
-                    // Get position
-                    Vector3 position = new Vector3(
-                        xView.Get<float>(i),
-                        yView.Get<float>(i),
-                        zView.Get<float>(i)
-                    );
+                    float3 prevPos = positions3D[prevCellId];
+                    closestDistSq = math.distancesq(prevPos, pixelPos);
                     
-                    // Calculate distance to plane
-                    float distanceToPlane = Mathf.Abs(Vector3.Dot(position - worldPlanePoint, worldPlaneNormal));
+                    // Get adjacency info for the previous cell
+                    float adjOffset = points[prevCellId].w;
+                    float nextAdjOffset = (prevCellId < points.Length - 1) ? 
+                        points[prevCellId + 1].w : adjacency.Length;
                     
-                    // If close enough to the plane, include it
-                    if (distanceToPlane <= cullingDistance)
-                    {
-                        oldToNewIndex[i] = relevantCentroids.Count;
-                        relevantCentroids.Add(i);
-                        relevantPositions.Add(position);
-                    }
-                }
-                
-                ReportProgress(progressCallback, 0.3f, 
-                    $"Found {relevantCentroids.Count} of {totalVertices} centroids near the boundary");
-                
-                // Create 2D texture to store cell IDs
-                Texture2D texture = new Texture2D(resolution, resolution, TextureFormat.RGBAFloat, false);
-                texture.filterMode = FilterMode.Point;
-                
-                // Get face axes for mapping 3D to 2D
-                GetFaceAxes(boundingBoxFace, out Vector3 uAxis, out Vector3 vAxis);
-                uAxis = localToWorld.MultiplyVector(uAxis);
-                vAxis = localToWorld.MultiplyVector(vAxis);
-                
-                // Generate the 2D texture
-                ReportProgress(progressCallback, 0.4f, "Generating 2D Voronoi diagram...");
-                
-                // For each pixel in the texture
-                for (int y = 0; y < resolution; y++)
-                {
-                    if (y % 50 == 0)
-                    {
-                        float progress = 0.4f + 0.5f * ((float)y / resolution);
-                        ReportProgress(progressCallback, progress, $"Processing row {y} of {resolution}...");
-                    }
+                    int adjFrom = (int)adjOffset;
+                    int adjTo = (int)nextAdjOffset;
                     
-                    for (int x = 0; x < resolution; x++)
+                    // Check adjacent cells
+                    for (int a = adjFrom; a < adjTo; a++)
                     {
-                        // Map texture coordinates to 3D position on the face plane
-                        float u = (x / (float)(resolution - 1)) - 0.5f;
-                        float v = (y / (float)(resolution - 1)) - 0.5f;
-                        
-                        // Convert to world space position on the face
-                        Vector3 worldPos = worldPlanePoint + (uAxis * u * boundingBoxSize.x) + (vAxis * v * boundingBoxSize.y);
-                        
-                        // Find closest centroid
-                        int closestIndex = -1;
-                        float closestDistSq = float.MaxValue;
-                        
-                        for (int i = 0; i < relevantPositions.Count; i++)
-                        {
-                            float distSq = (relevantPositions[i] - worldPos).sqrMagnitude;
-                            if (distSq < closestDistSq)
-                            {
-                                closestDistSq = distSq;
-                                closestIndex = i;
-                            }
-                        }
-                        
-                        // Store the cell ID in the texture
-                        if (closestIndex >= 0)
-                        {
-                            int originalIndex = relevantCentroids[closestIndex];
+                        if (a < 0 || a >= adjacency.Length)
+                            continue;
                             
-                            // Convert index to color - up to 16.7 million unique IDs
-                            // R = most significant byte, B = least significant byte
-                            Color32 indexColor = IndexToColor(originalIndex);
-                            texture.SetPixel(x, y, indexColor);
-                        }
-                        else
+                        int adjCellId = (int)adjacency[a];
+                            
+                        float3 adjPos = positions3D[adjCellId];
+                        float distSq = math.distancesq(adjPos, pixelPos);
+                        
+                        if (distSq < closestDistSq)
                         {
-                            // Shouldn't happen, but just in case
-                            texture.SetPixel(x, y, Color.black);
+                            closestDistSq = distSq;
+                            closestCellId = adjCellId;
                         }
                     }
                 }
                 
-                texture.Apply();
+                textureData[pixelIndex] = closestCellId;
+            }
+            
+            ReportProgress(progressCallback, 0.6f, "Scanning rows in parallel...");
+            
+            // Process rows in parallel
+            var scanJobHandle = new ScanRowsJob
+            {
+                resolution = resolution,
+                points = points,
+                positions3D = positions3D,
+                adjacency = adjacency,
+                textureData = textureData,
+                planePoint = worldPlanePoint,
+                uAxis = uAxis,
+                vAxis = vAxis,
+                boxSize = boundingBoxSize
+            }.Schedule(resolution, 1);
+            
+            scanJobHandle.Complete();
+            
+            ReportProgress(progressCallback, 0.9f, "Converting texture data...");
+            
+            // Convert the texture data to colors
+            Texture2D texture = new Texture2D(resolution, resolution, TextureFormat.RGBA32, false);
+            texture.filterMode = FilterMode.Point;
+            Color32[] pixels = new Color32[resolution * resolution];
+            
+            for (int i = 0; i < textureData.Length; i++)
+            {
+                int cellId = textureData[i];
+                pixels[i] = IndexToColor(cellId);
+                boundary_cells.Add(cellId);
+            }
+            
+            // Apply the texture
+            texture.SetPixels32(pixels);
+            texture.Apply();
+            
+            // Cleanup
+            points.Dispose();
+            adjacency.Dispose();
+            positions3D.Dispose();
+            textureData.Dispose();
+            
+            ReportProgress(progressCallback, 1.0f, "Voronoi boundary texture generation complete!");
+            return (texture, boundary_cells);
+        }
+        
+        
+        public static Texture2D RemapBoundaryTexture(
+            Texture2D texture,
+            Dictionary<int, int> oldToNewIndex,
+            int resolution
+        ) {
+            // Create a new texture with the same resolution
+            Texture2D newTexture = new Texture2D(resolution, resolution, TextureFormat.RGBA32, false);
+            
+            // Get all pixels from the original texture
+            Color32[] pixels = texture.GetPixels32();
+            Color32[] newPixels = new Color32[pixels.Length];
+            
+            // Process each pixel to remap indexes
+            for (int i = 0; i < pixels.Length; i++) {
+                // Convert color to index
+                int oldIndex = ColorToIndex(pixels[i]);
                 
-                ReportProgress(progressCallback, 0.95f, "Generating additional boundary info...");
-                
-                // Generate companion texture with additional data if needed
-                // For example: distance to centroid, normal vector, etc.
-                
-                ReportProgress(progressCallback, 1.0f, "Boundary texture generation complete!");
-                return texture;
+                // Check if this index needs remapping
+                int newIndex;
+                oldToNewIndex.TryGetValue(oldIndex, out newIndex);
+                newPixels[i] = IndexToColor(newIndex);
+
+            }
+            
+            // Apply the new pixels to the texture
+            newTexture.SetPixels32(newPixels);
+            newTexture.Apply();
+            
+            return newTexture;
+        }
+        
+        // Helper method to convert UV to world position on the face
+        private static Vector3 WorldPositionFromUV(float2 uv, Vector3 planePoint, Vector3 uAxis, Vector3 vAxis, Vector3 boxSize)
+        {
+            // Map UV from [0,1] to [-0.5,0.5] for each axis
+            float uMapped = uv.x - 0.5f;
+            float vMapped = uv.y - 0.5f;
+            
+            // Calculate world position
+            return planePoint + uMapped * boxSize.x * uAxis + vMapped * boxSize.y * vAxis;
+        }
+        
+        [BurstCompile]
+        private struct FillPointsDataJob : IJobParallelFor
+        {
+            [ReadOnly] public PropertyView x;
+            [ReadOnly] public PropertyView y;
+            [ReadOnly] public PropertyView z;
+            [ReadOnly] public PropertyView adj_offset;
+            [WriteOnly] public NativeArray<float4> points;
+
+            public void Execute(int i)
+            {
+                points[i] = new float4(
+                    x.Get<float>(i),
+                    y.Get<float>(i),
+                    z.Get<float>(i),
+                    adj_offset.Get<float>(i)
+                );
             }
         }
         
+        [BurstCompile]
+        private struct ReadUintJob : IJobParallelFor
+        {
+            [ReadOnly] public PropertyView view;
+            [WriteOnly] public NativeArray<uint> target;
+
+            public void Execute(int i)
+            {
+                target[i] = view.Get<uint>(i);
+            }
+        }
+        
+        [BurstCompile]
+        private struct ScanRowsJob : IJobParallelFor
+        {
+            public int resolution;
+            [ReadOnly] public NativeArray<float4> points;
+            [ReadOnly] public NativeArray<float3> positions3D;
+            [ReadOnly] public NativeArray<uint> adjacency;
+            [NativeDisableParallelForRestriction] public NativeArray<int> textureData;
+            
+            // Parameters for world position calculation
+            public Vector3 planePoint;
+            public Vector3 uAxis;
+            public Vector3 vAxis;
+            public Vector3 boxSize;
+            
+            public void Execute(int y)
+            {
+                // Skip first column (already initialized)
+                for (int x = 1; x < resolution; x++)
+                {
+                    int pixelIndex = y * resolution + x;
+                    int prevPixelIndex = y * resolution + (x - 1);
+                    int prevCellId = textureData[prevPixelIndex];
+                    
+                    // Calculate world position for this pixel
+                    float2 pixelUV = new float2(x / (float)(resolution - 1), y / (float)(resolution - 1));
+                    Vector3 pixelWorldPos = WorldPositionFromUV(pixelUV, planePoint, uAxis, vAxis, boxSize);
+                    float3 pixelPos = new float3(pixelWorldPos.x, pixelWorldPos.y, pixelWorldPos.z);
+                    
+                    // Start with previous cell as closest
+                    int closestCellId = prevCellId;
+                    float closestDistSq = float.MaxValue;
+                    
+                    if (prevCellId >= 0 && prevCellId < points.Length)
+                    {
+
+                        float3 prevPos = positions3D[prevCellId];
+                        closestDistSq = math.distancesq(prevPos, pixelPos);
+                        
+                        
+                        // Get adjacency info for the previous cell
+                        float adjOffset = points[prevCellId].w;
+                        float nextAdjOffset = (prevCellId < points.Length - 1) ? 
+                            points[prevCellId + 1].w : adjacency.Length;
+                        
+                        int adjFrom = (int)adjOffset;
+                        int adjTo = (int)nextAdjOffset;
+                        
+                        // Check all adjacent cells
+                        for (int a = adjFrom; a < adjTo; a++)
+                        {
+                            if (a < 0 || a >= adjacency.Length)
+                                continue;
+                                
+                            int adjCellId = (int)adjacency[a];
+                            
+                            float3 adjPos = positions3D[adjCellId];
+                            float distSq = math.distancesq(adjPos, pixelPos);
+                            
+                            if (distSq < closestDistSq)
+                            {
+                                closestDistSq = distSq;
+                                closestCellId = adjCellId;
+                            }
+                        }
+                    }
+                    
+                    // Store the closest cell ID
+                    textureData[pixelIndex] = closestCellId;
+                }
+            }
+        }
+        
+        // Helper methods
         private static Vector3 GetFaceNormal(int face)
         {
             return face switch
@@ -234,10 +423,15 @@ namespace Ply
             byte b = (byte)(index & 0xFF);
             return new Color32(r, g, b, 255);
         }
-        
+
         private static int ColorToIndex(Color32 color)
         {
-            return (color.r << 16) | (color.g << 8) | color.b;
+            // Reverse the encoding from IndexToColor
+            int index = 0;
+            index |= color.r << 16;
+            index |= color.g << 8;
+            index |= color.b;
+            return index;
         }
         
         private static void ReportProgress(Action<float, string> callback, float progress, string message)

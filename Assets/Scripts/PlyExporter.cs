@@ -23,6 +23,8 @@ namespace Ply
                 return false;
             }
 
+            int resolution = 4096;
+
             try
             {
                 using (Model model = sourceData.Load())
@@ -133,19 +135,37 @@ namespace Ply
                         }
                     }
                     
+                    // Generate boundary textures if bounding box is used
+                    Texture2D[] boundaryTextures = new Texture2D[6];
+                    HashSet<int> boundaryCells = new HashSet<int>();
+                    if (useBoundingBox)
+                    {
+                        ReportProgress(progressCallback, 0.35f, "Generating boundary lookup data...");
+                        
+                        // Generate boundary textures by calling BoundaryTextureGenerator
+                        (boundaryTextures, boundaryCells) = GenerateBoundaryTextures(
+                            sourceData,
+                            boundingBoxCenter,
+                            boundingBoxSize,
+                            boundingBoxRotation,
+                            resolution
+                        );
+                    }
+                    
+                    excludedPoints.SymmetricExceptWith(boundaryCells);
+
                     // Count how many points will be in the output (not excluded)
                     int outputCount = totalVertices - excludedPoints.Count;
                     
                     ReportProgress(progressCallback, 0.2f, $"Exporting {outputCount} of {totalVertices} points...");
-                    
+
                     // Create mapping from old indices to new indices
                     Dictionary<int, int> oldToNewIndex = new Dictionary<int, int>();
                     int newIndex = 0;
                     
                     for (int i = 0; i < totalVertices; i++)
                     {
-                        if (!excludedPoints.Contains(i))
-                        {
+                        if (!excludedPoints.Contains(i)) {
                             oldToNewIndex[i] = newIndex++;
                         }
                     }
@@ -176,8 +196,8 @@ namespace Ply
                             {
                                 uint adjVertex = adjacencyView.Get<uint>((int)adj);
                                 
-                                // Only include adjacencies to vertices that aren't excluded
-                                if (!excludedPoints.Contains((int)adjVertex) && oldToNewIndex.TryGetValue((int)adjVertex, out int newAdjIndex))
+                                // Only include adjacencies to vertices that aren't excluded or lies on the boundary
+                                if (!excludedPoints.Contains(i) && oldToNewIndex.TryGetValue((int)adjVertex, out int newAdjIndex))
                                 {
                                     newAdjacencyData.Add((uint)newAdjIndex);
                                     currentOffset++;
@@ -187,22 +207,6 @@ namespace Ply
                             // Store the new offset
                             newAdjacencyOffsets.Add(currentOffset);
                         }
-                    }
-                    
-                    // Generate boundary textures if bounding box is used
-                    Texture2D[] boundaryTextures = new Texture2D[6];
-                    if (useBoundingBox)
-                    {
-                        ReportProgress(progressCallback, 0.35f, "Generating boundary lookup data...");
-                        
-                        // Generate boundary textures by calling BoundaryTextureGenerator
-                        boundaryTextures = GenerateBoundaryTextures(
-                            sourceData,
-                            boundingBoxCenter,
-                            boundingBoxSize,
-                            boundingBoxRotation,
-                            4096
-                        );
                     }
                     
                     // Open the file for writing
@@ -323,6 +327,13 @@ namespace Ply
                         // Additionally encode the texture data directly in the PLY
                         for (int i = 0; i < boundaryTextures.Length; i++)
                         {
+                            // Remap underlying boundary textures to new scheme
+                            boundaryTextures[i] = BoundaryTextureGenerator.RemapBoundaryTexture(
+                                boundaryTextures[i],
+                                oldToNewIndex,
+                                resolution
+                            );
+
                             // Convert texture to bytes
                             byte[] textureBytes = boundaryTextures[i].EncodeToPNG();
                             
@@ -346,7 +357,7 @@ namespace Ply
         }
         
         // Convenience method to generate only boundary textures without exporting PLY
-        public static Texture2D[] GenerateBoundaryTextures(
+        public static (Texture2D[], HashSet<int>) GenerateBoundaryTextures(
             PlyData sourceData,
             Vector3 boundingBoxCenter,
             Vector3 boundingBoxSize,
@@ -354,7 +365,7 @@ namespace Ply
             int resolution = 1024,
             Action<float, string> progressCallback = null)
         {
-            if (sourceData == null)
+            if (sourceData == default)
             {
                 Debug.LogError("Null PlyData source provided to texture generator");
                 throw new ArgumentNullException(nameof(sourceData));
@@ -363,21 +374,24 @@ namespace Ply
             try
             {
                 Texture2D[] boundaryTexture = new Texture2D[6];
+                HashSet<int> boundaryCells = new HashSet<int>() ;
+                HashSet<int> temp = new HashSet<int>() ;
 
                 // Call the boundary texture generator from BoundaryTexture.cs
                 for (int i = 0; i < 6; i++) {
-                    boundaryTexture[i] = BoundaryTextureGenerator.GenerateBoundaryTexture(
+                    (boundaryTexture[i], temp) = BoundaryTextureGenerator.GenerateBoundaryTexture(
                         sourceData,
                         i,
-                        resolution,
                         boundingBoxCenter,
                         boundingBoxSize,
                         boundingBoxRotation,
+                        resolution,
                         progressCallback
                     );
+                    boundaryCells.UnionWith(temp);
                 }
 
-                return boundaryTexture;
+                return (boundaryTexture, boundaryCells);
             }
             catch (Exception e)
             {

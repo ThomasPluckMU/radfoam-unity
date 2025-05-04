@@ -386,19 +386,19 @@ namespace Ply
                             rotation.z = float.Parse(col[2]);
                         } else if (col[1] == "bb_rotation_w") {
                             rotation.w = float.Parse(col[2]);
+                        } else if (col[1] == "boundary_texture_prefix") {
+                            texturePrefix = col[2];
+                        } else if (col[1].StartsWith("boundary_texture_") && col[1].Contains("_data")) {
+                                // Extract texture index from boundary_texture_X_data
+                                string[] parts = col[1].Split('_');
+                                if (parts.Length >= 3 && int.TryParse(parts[2], out int textureIndex))
+                                {
+                                    // Collect the base64 data
+                                    string textureData = col[2]; // Or join remaining columns if needed
+                                    textureDataDict[textureIndex] = textureData;
+                                }
                         }
                     }
-                } else if (col[1] == "boundary_texture_prefix") {
-                    texturePrefix = col[2];
-                } else if (col[1].StartsWith("boundary_texture_") && col[1].Contains("_data")) {
-                        // Extract texture index from boundary_texture_X_data
-                        string[] parts = col[1].Split('_');
-                        if (parts.Length >= 3 && int.TryParse(parts[2], out int textureIndex))
-                        {
-                            // Collect the base64 data
-                            string textureData = col[2]; // Or join remaining columns if needed
-                            textureDataDict[textureIndex] = textureData;
-                        }
                 } else if (kind == HeaderLineKind.EndHeader) {
                     add_current_element();
                     break;

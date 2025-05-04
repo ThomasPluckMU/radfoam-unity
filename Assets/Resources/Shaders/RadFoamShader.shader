@@ -256,7 +256,6 @@ Shader "Hidden/Custom/RadFoamShader"
                 float box_t_enter, box_t_exit;
                 if (_HasBoundingBox) {
                     bool intersects_box = RayBoxIntersection(ray, box_t_enter, box_t_exit);
-                
                     // Early termination if ray doesn't hit bounding box
                     if (!intersects_box) {
                         return src_color;
@@ -285,10 +284,9 @@ Shader "Hidden/Custom/RadFoamShader"
                             
                             // Look up cell index from boundary texture
                             float4 boundaryData = SampleBoundaryTexture(hitPos, faceIndex);
-                            
                             // Extract cell index from texture (stored in the R channel as a normalized float)
                             cell = DecodeIndexFromColor(boundaryData);
-                            
+
                         } else {
                             // If no boundary textures, fall back to closest cell
                             cell = _start_index;
